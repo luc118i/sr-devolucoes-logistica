@@ -1,0 +1,680 @@
+<script>
+/**
+ * Tela Bloqueios: envia o relatório do Santri (.ods) e mostra o quadro cruzado com a DATABASE.
+ * O resultado fica na memória da página: ao recarregar, é preciso enviar o arquivo de novo.
+ * A única gravação são os selos dos cartões (aba oculta); as colunas ocultas ficam neste navegador.
+ */
+(function () {
+  'use strict';
+  var SR = window.SR, h = SR.h, limpar = SR.limpar;
+  function $(id) { return document.getElementById(id); }
+
+  var LIMITE_BYTES = 15 * 1024 * 1024;
+  var AGING_ALERTA = 60, AGING_CRITICO = 180;
+  var ABAS = {
+    abertos: {
+      nome: 'Abertos', rotulo: 'bloqueios abertos', valor: 'pendentes',
+      nota: 'Bloqueios com status Ab no Santri, cruzados pelo número com a DATABASE. Os dias contam a partir do cadastro do bloqueio.'
+    },
+    baixados: {
+      nome: 'Baixados em tratativa', rotulo: 'bloqueios baixados', valor: 'no valor do bloqueio',
+      nota: 'Já baixados no Santri, mas a ocorrência segue em andamento na DATABASE. O material pode continuar na pilha até a coleta. Os dias contam a partir do cadastro do bloqueio.'
+    },
+    fora: {
+      nome: 'Fora do relatório', rotulo: 'bloqueios ou ocorrências', valor: 'aproximados',
+      nota: 'Ocorrências em andamento cujo bloqueio não veio no relatório, então não há situação do Santri para elas. Os valores vêm da DATABASE e os dias contam a partir da ocorrência.'
+    }
+  };
+  var COLUNAS_FIXAS = [
+    { id: 'SEM', nome: 'Sem ocorrência', tom: 'erro' },
+    { id: 'CONFIRMAR', nome: 'Vínculo a confirmar', tom: 'aviso' }
+  ];
+  var ALTURA_MIN_QUADRO = 420;
+  var st = { dados: null, arquivo: null, aba: 'abertos', busca: '', forn: '', selo: '', ordem: 'dias', ocultas: colunasOcultasSalvas(), relGrupos: {} };
+
+  function colunasOcultasSalvas() {
+    try { return JSON.parse(SR.lembrado('bloqOcultas') || '{}') || {}; } catch (e) { return {}; }
+  }
+  function chaveColuna(id) { return st.aba + '|' + id; }
+  function estaOculta(id) { return !!st.ocultas[chaveColuna(id)]; }
+  function definirOculta(id, sim) {
+    if (sim) st.ocultas[chaveColuna(id)] = true; else delete st.ocultas[chaveColuna(id)];
+    SR.lembrar('bloqOcultas', JSON.stringify(st.ocultas));
+    renderQuadro();
+  }
+
+  function brl(v) { return Number(v).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }); }
+  function milhar(s) { return String(s).replace(/\B(?=(\d{3})+(?!\d))/g, '.'); }
+  function dataBr(iso) { return iso ? iso.split('-').reverse().join('/') : ''; }
+  function diasTexto(n) { return n + (n === 1 ? ' dia' : ' dias'); }
+
+  /** Texto que copia ao clicar. O visível pode ter rótulo ("Cód. 123"); copia só o valor. */
+  function copiavel(visivel, valor, rotulo) {
+    return h('button', {
+      type: 'button', class: 'bloq-copiar', title: 'Clique para copiar', 'aria-label': 'Copiar ' + rotulo.toLowerCase() + ' ' + valor,
+      onclick: function () { SRHome.copiar(String(valor), rotulo); }
+    }, visivel);
+  }
+
+  function textoBusca(c) {
+    var p = [c.b, milhar(c.b), c.ent, c.forn];
+    c.itens.forEach(function (i) { p.push(i.cod, i.nome, i.marca); });
+    c.occ.forEach(function (o) { p.push(o.prot, o.nf, o.ped, o.nfd, o.cod, o.prod); });
+    return SR.normalizar(p.concat(c.selos).join(' '));
+  }
+
+  function filtrados() {
+    var q = SR.normalizar(st.busca);
+    var soNumero = /^[\d.\s]+$/.test(st.busca.trim()) ? st.busca.replace(/[.\s]/g, '') : '';
+    var lista = st.dados[st.aba].filter(function (c) {
+      if (st.forn && c.forn !== st.forn) return false;
+      if (st.selo && c.selos.indexOf(st.selo) < 0) return false;
+      return !q || c._busca.indexOf(q) >= 0 || (soNumero && c._busca.indexOf(soNumero) >= 0);
+    });
+    var ordens = {
+      dias: function (a, b) { return b.dias - a.dias; },
+      valor: function (a, b) { return b.valor - a.valor; },
+      numero: function (a, b) { return (Number(a.b) || 0) - (Number(b.b) || 0); }
+    };
+    return lista.sort(ordens[st.ordem]);
+  }
+
+  /** Colunas da aba: as fixas de "abertos" e as situações presentes, no fluxo da devolução. */
+  function colunas() {
+    var presentes = {};
+    st.dados[st.aba].forEach(function (c) { presentes[c.col] = true; });
+    var fixas = st.aba === 'abertos' ? COLUNAS_FIXAS : [];
+    var ids = fixas.map(function (c) { return c.id; });
+    var lista = fixas.slice();
+    st.dados.ordem.forEach(function (s) {
+      if (presentes[s]) { lista.push({ id: s, nome: s, tom: tom(s) }); ids.push(s); }
+    });
+    Object.keys(presentes).forEach(function (s) {
+      if (ids.indexOf(s) < 0) lista.push({ id: s, nome: s, tom: 'neutro' });
+    });
+    return lista;
+  }
+  function tom(s) {
+    var n = SR.normalizar(s);
+    if (/SEM STATUS|VERIFICAR/.test(n)) return 'erro';
+    if (/FINALIZADA|TRANSPORTADORA/.test(n)) return 'ok';
+    return /AGUARDANDO/.test(n) ? 'info' : 'neutro';
+  }
+
+  // ── painel de detalhes ───────────────────────────────────────────────────
+  function campo(rotulo, valor, largo) {
+    return h('div', { class: largo ? 'largo' : '' }, [h('dt', {}, rotulo), h('dd', {}, valor === '' || valor == null ? '—' : String(valor))]);
+  }
+  function secao(titulo, filhos) { return h('section', { class: 'painel-secao' }, [h('h3', {}, titulo)].concat(filhos)); }
+  function nomeColuna(id) {
+    var fixa = COLUNAS_FIXAS.filter(function (c) { return c.id === id; })[0];
+    return fixa ? fixa.nome : id;
+  }
+  function tomColuna(id) {
+    var fixa = COLUNAS_FIXAS.filter(function (c) { return c.id === id; })[0];
+    return fixa ? fixa.tom : tom(id);
+  }
+
+  /** Produtos pendentes do cartão que ainda não têm ocorrência. */
+  function produtosSemOcorrencia(c) {
+    if (c.aba !== 'abertos' || c.cand) return [];
+    var comOcorrencia = c.occ.map(function (o) { return o.cod; });
+    return c.itens.filter(function (i) { return comOcorrencia.indexOf(i.cod) < 0; });
+  }
+  function linhasDoCartao(c) {
+    return c.cand ? [] : c.occ.map(function (o) { return o.linha; }).filter(Boolean);
+  }
+
+  function montar(c) {
+    var itens = produtosSemOcorrencia(c);
+    SRHome.fecharPainel();
+    SR.montarDeBloqueio({
+      numero: c.b, rotulo: milhar(c.b), entrada: c.ent, fornecedor: c.forn.replace(/\s*\(.*\)$/, ''),
+      valor: itens.reduce(function (s, i) { return s + i.vp; }, 0),
+      resumo: itens[0].nome + (itens.length > 1 ? ' +' + (itens.length - 1) + (itens.length === 2 ? ' item' : ' itens') : ''),
+      itens: itens.map(function (i) { return { cod: i.cod, nome: i.nome, marca: i.marca, un: i.un, qtd: i.qtd }; })
+    });
+  }
+
+  function erroAoAbrir(e) { SR.toast('Não foi possível abrir: ' + SR.erroServidor(e)); }
+
+  /** Dados atuais da planilha, não a foto do relatório. */
+  function buscarOcorrencias(linhas, texto) {
+    return SR.chamar('ocorrenciasDasLinhas', [linhas], texto).then(function (lista) {
+      if (!lista.length) throw new Error('Ocorrência não encontrada na planilha. Clique em Atualizar ocorrências.');
+      return lista;
+    });
+  }
+  function abrirOcorrencia(linha, origem) {
+    buscarOcorrencias([linha], 'Abrindo a ocorrência…').then(function (l) { SRHome.abrirOcorrencia(l[0], origem); }).catch(erroAoAbrir);
+  }
+  /** Cada protocolo tem o seu e-mail: com mais de um, a pessoa escolhe. */
+  function rascunhoDasLinhas(linhas, origem) {
+    buscarOcorrencias(linhas, 'Abrindo o rascunho…').then(function (lista) {
+      if (lista.length === 1) { SRHome.formalizar(lista[0], origem); return; }
+      SRHome.abrirPainel('Gerar rascunho', lista.length + ' protocolos: cada um tem o seu e-mail', lista.map(function (o) {
+        return h('div', { class: 'bloq-painel-ocorrencia' }, [
+          h('div', { class: 'bloq-painel-linha' }, [h('strong', {}, 'Protocolo ' + o.protocolo), o.formalizado ? h('span', { class: 'selo ok' }, 'Formalizada') : h('span', { class: 'selo aviso' }, 'Não formalizada')]),
+          h('div', { class: 'item-meta' }, (o.produto || o.codProduto) + ' · qtd. ' + o.qtd),
+          h('div', { class: 'estado-acoes bloq-painel-acoes' }, [h('button', { type: 'button', class: 'btn primario pequeno', onclick: function () { SRHome.formalizar(o, origem); } }, 'Gerar rascunho')])
+        ]);
+      }), origem);
+    }).catch(erroAoAbrir);
+  }
+
+  function blocoOcorrencia(o, c, origem) {
+    var dados = [campo('Data', dataBr(o.data)), campo('Quantidade', o.qtd ? SR.num(o.qtd) : ''), campo('Nota fiscal', o.nf), campo('Pedido', o.ped), campo('Tipo', o.tipo, true)];
+    if (o.nfd) dados.push(campo('NFD', o.nfd));
+    dados.push(campo('Formalizada em', o.dform ? dataBr(o.dform) : 'Não formalizada'));
+    if (o.obs) dados.push(campo('Observação', o.obs, true));
+    return h('div', { class: 'bloq-painel-ocorrencia' }, [
+      h('div', { class: 'bloq-painel-linha' }, [h('strong', {}, 'Protocolo ' + o.prot), h('span', { class: 'selo ' + tom(o.status) }, o.status)]),
+      h('dl', { class: 'dados' }, dados),
+      o.linha ? h('div', { class: 'estado-acoes bloq-painel-acoes' }, [
+        c.cand ? null : h('button', { type: 'button', class: 'btn primario pequeno', onclick: function () { rascunhoDasLinhas([o.linha], origem); } }, 'Gerar rascunho'),
+        h('button', { type: 'button', class: 'btn leve pequeno', onclick: function () { abrirOcorrencia(o.linha, origem); } }, 'Abrir ocorrência')
+      ]) : null
+    ]);
+  }
+
+  function abrirPainelBloqueio(c, origem) {
+    var titulo = c.b ? 'Bloqueio ' + milhar(c.b) : 'Ocorrência sem bloqueio';
+    var sub = c.forn + ' · ' + diasTexto(c.dias) + (c.aba === 'fora' ? ' desde a ocorrência' : ' desde o cadastro');
+    var semOcorrencia = produtosSemOcorrencia(c);
+    var resumo = [campo(c.aba === 'abertos' ? 'Valor pendente' : 'Valor', brl(c.valor)), campo('Tipo do bloqueio', c.tipo)];
+    if (c.ent) resumo.push(campo('Entrada', c.ent));
+    resumo.push(campo(c.aba === 'fora' ? 'Ocorrência em' : 'Cadastro', dataBr(c.data)));
+    if (c.baixa) resumo.push(campo('Baixa', dataBr(c.baixa)));
+    var filhos = [
+      c.occ.length === 1 && !c.cand ? null : h('div', {}, h('span', { class: 'selo ' + tomColuna(c.col) }, nomeColuna(c.col))),
+      c.cand ? h('p', { class: 'bloq-vinculo' }, c.cand.motivo + ' Situação do protocolo: ' + c.cand.status + '.') : null,
+      c.alertas.length ? h('ul', { class: 'bloq-alertas' }, c.alertas.map(function (a) { return h('li', {}, a); })) : null,
+      semOcorrencia.length ? h('div', { class: 'estado-acoes bloq-painel-acoes' }, [
+        h('button', { type: 'button', class: 'btn primario', onclick: function () { montar(c); } }, 'Montar ocorrência')
+      ]) : null,
+      secao('Resumo', [h('dl', { class: 'dados' }, resumo)]),
+      secao(c.aba === 'abertos' ? 'Produtos pendentes' : 'Produtos', c.itens.map(function (i) {
+        var detalhe = [];
+        if (i.marca) detalhe.push(i.marca);
+        if (i.local) detalhe.push(i.local);
+        return h('div', { class: 'bloq-painel-item' }, [
+          h('div', {}, [
+            h('div', { class: 'bloq-painel-nome' }, copiavel(i.nome, i.nome, 'Item')),
+            h('div', { class: 'item-meta' }, [copiavel('Cód. ' + i.cod, i.cod, 'Código'), detalhe.length ? ' · ' + detalhe.join(' · ') : null])
+          ]),
+          h('div', { class: 'bloq-painel-qtd num' }, [h('strong', {}, SR.num(i.qtd) + (i.un ? ' ' + i.un : '')), i.vp != null ? h('span', {}, brl(i.vp)) : null])
+        ]);
+      })),
+      c.occ.length ? secao(c.cand ? 'Ocorrência provável' : (c.occ.length === 1 ? 'Ocorrência' : 'Ocorrências (' + c.occ.length + ')'), c.occ.map(function (o) { return blocoOcorrencia(o, c, origem); })) : null
+    ];
+    SRHome.abrirPainel(titulo, sub, filhos, origem);
+    if (c.b) {
+      var alvo = limpar($('painelTitulo'));
+      alvo.appendChild(document.createTextNode('Bloqueio '));
+      alvo.appendChild(copiavel(milhar(c.b), c.b, 'Bloqueio'));
+    }
+  }
+
+  // ── selos ────────────────────────────────────────────────────────────────
+  function salvarSelo(chave, selo, ligar) {
+    return new Promise(function (ok, falha) {
+      google.script.run.withSuccessHandler(ok).withFailureHandler(falha).alterarSeloBloqueio(chave, selo, ligar);
+    });
+  }
+  function mesmoSelo(a, b) { return SR.normalizar(a) === SR.normalizar(b); }
+
+  /** Mostra na hora e confirma no servidor; se falhar, volta como estava e avisa. */
+  function alterarSelo(c, selo, ligar) {
+    var texto = String(selo || '').replace(/\s+/g, ' ').trim(), antes = c.selos;
+    if (!texto) { redesenhar(c); return; }
+    if (ligar && c.selos.some(function (s) { return mesmoSelo(s, texto); })) { redesenhar(c); return; }
+    c.selos = ligar ? c.selos.concat([texto]) : c.selos.filter(function (s) { return s !== texto; });
+    redesenhar(c);
+    salvarSelo(c.chave, texto, ligar).then(function (r) {
+      c.selos = r.selos;
+      st.dados.selosOpcoes = r.opcoes;
+      redesenhar(c);
+      renderFiltroSelo();
+    }).catch(function (e) {
+      c.selos = antes;
+      redesenhar(c);
+      SR.toast('Selo não salvo: ' + SR.erroServidor(e));
+    });
+  }
+  function redesenhar(c) {
+    c._busca = textoBusca(c);
+    var velho = c._el; // cartao() troca c._el
+    if (velho && velho.parentNode) velho.parentNode.replaceChild(cartao(c), velho);
+  }
+  function escolhaDeSelo(c, area) {
+    limpar(area);
+    st.dados.selosOpcoes.filter(function (s) { return !c.selos.some(function (x) { return mesmoSelo(x, s); }); }).forEach(function (s) {
+      area.appendChild(h('button', { type: 'button', class: 'bloq-selo-opcao', onclick: function () { alterarSelo(c, s, true); } }, s));
+    });
+    var campo = h('input', {
+      type: 'text', class: 'bloq-selo-campo', maxlength: '40', placeholder: 'Novo selo e Enter', 'aria-label': 'Escrever novo selo',
+      onkeydown: function (ev) {
+        if (ev.key === 'Enter') { ev.preventDefault(); alterarSelo(c, campo.value, true); }
+        if (ev.key === 'Escape') redesenhar(c);
+      }
+    });
+    area.appendChild(campo);
+    area.appendChild(h('button', { type: 'button', class: 'link bloq-selo-fechar', onclick: function () { redesenhar(c); } }, 'Fechar'));
+    campo.focus();
+  }
+  function areaSelos(c) {
+    var area = h('div', { class: 'bloq-selos' });
+    c.selos.forEach(function (s) {
+      area.appendChild(h('button', { type: 'button', class: 'bloq-selo', title: 'Tirar este selo', 'aria-label': 'Tirar o selo ' + s, onclick: function () { alterarSelo(c, s, false); } }, [
+        h('span', {}, s), h('span', { class: 'bloq-selo-x', 'aria-hidden': 'true' }, '×')
+      ]));
+    });
+    area.appendChild(h('button', { type: 'button', class: 'bloq-selo-mais', onclick: function () { escolhaDeSelo(c, area); } }, '+ Selo'));
+    return area;
+  }
+
+  function acoesCartao(c) {
+    var ver = h('button', { type: 'button', class: 'link bloq-ver', onclick: function () { abrirPainelBloqueio(c, ver); } }, 'Detalhes');
+    var acao = null;
+    if (produtosSemOcorrencia(c).length) acao = h('button', { type: 'button', class: 'bloq-acao', onclick: function () { montar(c); } }, 'Montar ocorrência');
+    else if (linhasDoCartao(c).length) acao = h('button', { type: 'button', class: 'bloq-acao', onclick: function () { rascunhoDasLinhas(linhasDoCartao(c), acao); } }, 'Gerar rascunho');
+    return h('div', { class: 'bloq-acoes' }, [ver, acao]);
+  }
+
+  function cartao(c) {
+    var primeiro = c.itens[0], mais = c.itens.length - 1;
+    var tomDias = c.dias > AGING_CRITICO ? 'erro' : c.dias > AGING_ALERTA ? 'aviso' : 'neutro';
+    var locais = [];
+    c.itens.forEach(function (i) { if (i.local && locais.indexOf(i.local) < 0) locais.push(i.local); });
+    var protocolos = [];
+    c.occ.forEach(function (o) { if (o.prot && protocolos.indexOf(o.prot) < 0) protocolos.push(o.prot); });
+    var meta = [c.tipo];
+    if (locais.length) meta.push(locais.join(', '));
+    if (protocolos.length && !c.cand) meta.push('Prot. ' + protocolos.join(', '));
+    if (c.baixa) meta.push('Baixa ' + dataBr(c.baixa));
+    c._el = h('article', { class: 'cartao-oc bloq-cartao' }, [
+      h('div', { class: 'bloq-topo' }, [
+        c.b ? h('span', { class: 'bloq-numero num' }, copiavel(milhar(c.b), c.b, 'Bloqueio')) : h('span', { class: 'bloq-sem-numero' }, 'Sem bloqueio'),
+        h('span', { class: 'bloq-dias ' + tomDias }, diasTexto(c.dias))
+      ]),
+      h('p', { class: 'bloq-produto' }, [primeiro ? copiavel(primeiro.nome, primeiro.nome, 'Item') : '', mais > 0 ? h('span', {}, ' +' + mais + (mais === 1 ? ' item' : ' itens')) : null]),
+      h('div', { class: 'bloq-linha' }, [h('span', {}, c.forn), h('strong', { class: 'num' }, brl(c.valor))]),
+      h('div', { class: 'bloq-meta' }, meta.join(' · ')),
+      c.cand ? h('p', { class: 'bloq-vinculo' }, c.cand.motivo + ' Situação do protocolo: ' + c.cand.status + '.') : null,
+      c.alertas.length ? h('ul', { class: 'bloq-alertas' }, c.alertas.map(function (a) { return h('li', {}, a); })) : null,
+      areaSelos(c),
+      acoesCartao(c)
+    ]);
+    return c._el;
+  }
+
+  function renderQuadro() {
+    var lista = filtrados(), total = st.dados[st.aba].length, todas = colunas();
+    var emOcultas = lista.filter(function (c) { return estaOculta(c.col); }).length;
+    var visiveis = lista.length - emOcultas;
+    $('bloqContagem').textContent = (visiveis === total ? '' : 'Mostrando ' + visiveis + ' de ' + total) + (emOcultas ? ' · ' + emOcultas + ' em coluna oculta' : '');
+    renderOcultas(todas, lista);
+    var quadro = limpar($('bloqQuadro'));
+    todas.filter(function (col) { return !estaOculta(col.id); }).forEach(function (col) {
+      var cs = lista.filter(function (c) { return c.col === col.id; });
+      var soma = cs.reduce(function (s, c) { return s + c.valor; }, 0);
+      quadro.appendChild(h('section', { class: 'quadro-col bloq-col' }, [
+        h('div', { class: 'bloq-col-cab' }, [
+          h('h3', {}, [
+            h('span', { class: 'bloq-col-nome' }, col.nome),
+            h('span', { class: 'bloq-qtd ' + col.tom }, String(cs.length)),
+            h('button', { type: 'button', class: 'bloq-col-ocultar', title: 'Ocultar coluna', 'aria-label': 'Ocultar a coluna ' + col.nome, onclick: function () { definirOculta(col.id, true); } }, '×')
+          ]),
+          h('p', { class: 'num' }, brl(soma))
+        ]),
+        h('div', { class: 'quadro-cartoes' }, cs.length ? cs.map(cartao) : [h('div', { class: 'quadro-vazio' }, 'Nenhum bloqueio neste filtro.')])
+      ]));
+    });
+    ajustarAltura();
+  }
+
+  /** Colunas ocultas viram botões para mostrar de novo. */
+  function renderOcultas(todas, lista) {
+    var alvo = limpar($('bloqOcultas'));
+    var ocultas = todas.filter(function (col) { return estaOculta(col.id); });
+    if (!ocultas.length) return;
+    alvo.appendChild(h('span', {}, 'Colunas ocultas:'));
+    ocultas.forEach(function (col) {
+      var n = lista.filter(function (c) { return c.col === col.id; }).length;
+      alvo.appendChild(h('button', { type: 'button', class: 'bloq-oculta', title: 'Mostrar coluna', onclick: function () { definirOculta(col.id, false); } }, col.nome + ' (' + n + ')'));
+    });
+    if (ocultas.length > 1) {
+      alvo.appendChild(h('button', {
+        type: 'button', class: 'link',
+        onclick: function () {
+          ocultas.forEach(function (col) { delete st.ocultas[chaveColuna(col.id)]; });
+          SR.lembrar('bloqOcultas', JSON.stringify(st.ocultas));
+          renderQuadro();
+        }
+      }, 'Mostrar todas'));
+    }
+  }
+
+  /** O quadro ocupa o que sobra da janela, para rolar só dentro das colunas. */
+  function ajustarAltura() {
+    var q = $('bloqQuadro');
+    if (!q.offsetParent) return;
+    var topo = q.getBoundingClientRect().top + window.pageYOffset;
+    q.style.setProperty('--bloq-altura', Math.max(ALTURA_MIN_QUADRO, window.innerHeight - topo - 12) + 'px');
+  }
+
+  function renderResumo() {
+    var aba = ABAS[st.aba], todos = st.dados[st.aba];
+    var soma = todos.reduce(function (s, c) { return s + c.valor; }, 0);
+    var antigo = todos.reduce(function (m, c) { return Math.max(m, c.dias); }, 0);
+    var item = function (valor, rotulo) { return h('div', {}, [h('strong', { class: 'num' }, valor), h('span', {}, rotulo)]); };
+    limpar($('bloqResumo'));
+    [item(String(todos.length), aba.rotulo), item(brl(soma), aba.valor), item(diasTexto(antigo), 'o mais antigo')].forEach(function (e) { $('bloqResumo').appendChild(e); });
+    var nota = aba.nota;
+    if (st.aba === 'fora' && st.dados.filtros.length) nota += ' Filtros do relatório: ' + st.dados.filtros.join('; ') + '.';
+    $('bloqNota').textContent = nota;
+  }
+
+  function renderAbas() {
+    var alvo = limpar($('bloqAbas'));
+    Object.keys(ABAS).forEach(function (k) {
+      alvo.appendChild(h('button', {
+        type: 'button', role: 'tab', 'aria-selected': String(k === st.aba),
+        onclick: function () { st.aba = k; st.forn = ''; st.selo = ''; render(); }
+      }, ABAS[k].nome + ' ' + st.dados[k].length));
+    });
+  }
+
+  function renderFornecedores() {
+    var sel = $('bloqFornecedor'), nomes = [];
+    st.dados[st.aba].forEach(function (c) { if (nomes.indexOf(c.forn) < 0) nomes.push(c.forn); });
+    limpar(sel).appendChild(h('option', { value: '' }, 'Fornecedores'));
+    nomes.sort().forEach(function (n) { sel.appendChild(h('option', { value: n }, n)); });
+    sel.value = st.forn;
+  }
+
+  // ── relatório para o estoque ─────────────────────────────────────────────
+  /** Grupos escolhidos nos blocos do resumo; sem escolha, todos. */
+  function filtroAtivo() {
+    return st.dados.estoque.grupos.some(function (g) { return st.relGrupos[g.id]; });
+  }
+  function gruposVisiveis() {
+    var todos = st.dados.estoque.grupos;
+    return filtroAtivo() ? todos.filter(function (g) { return st.relGrupos[g.id]; }) : todos;
+  }
+  /** Totais e locais do que está na tela: acompanham o filtro. */
+  function resumoVisivel() {
+    var grupos = gruposVisiveis(), bloqueios = 0, produtos = 0, porLocal = {};
+    grupos.forEach(function (g) {
+      bloqueios += g.cartoes.length;
+      g.cartoes.forEach(function (c) {
+        c.itens.forEach(function (i) {
+          var local = i.local || 'Sem local';
+          produtos++;
+          porLocal[local] = (porLocal[local] || 0) + 1;
+        });
+      });
+    });
+    var locais = Object.keys(porLocal).sort(function (a, b) { return porLocal[b] - porLocal[a] || a.localeCompare(b, 'pt-BR'); });
+    return { grupos: grupos, bloqueios: bloqueios, produtos: produtos, locais: locais.map(function (l) { return l + ' (' + porLocal[l] + ')'; }).join(', ') };
+  }
+  function plural(n, um, varios) { return n + ' ' + (n === 1 ? um : varios); }
+  function alternarGrupo(id) {
+    st.relGrupos[id] = !st.relGrupos[id];
+    renderRelatorio();
+    var botao = $('bloqRelatorio').querySelector('[data-grupo="' + id + '"]');
+    if (botao) botao.focus();
+  }
+
+  function linhaResumoEstoque(g) {
+    return g.titulo + ': ' + g.cartoes.length + (g.cartoes.length === 1 ? ' bloqueio' : ' bloqueios');
+  }
+  function textoSituacoes(g) {
+    return g.situacoes.map(function (s) { return nomeColuna(s.col) + ' (' + s.bloqueios + ')'; }).join(', ');
+  }
+  /** Situação (STATUS), selos da equipe e observações do bloqueio, como etiquetas. */
+  function etiquetas(c, selos) {
+    return h('div', { class: 'bloq-rel-tags' }, [h('span', { class: 'selo ' + tomColuna(c.col) }, nomeColuna(c.col))]
+      .concat(selos.map(function (s) { return h('span', { class: 'bloq-rel-selo' }, s); }))
+      .concat(c.obs.map(function (o) { return h('span', { class: 'bloq-rel-alerta' }, o); })));
+  }
+  function celulaBloqueio(c, span) {
+    var extra = [];
+    if (c.prots.length) extra.push('Prot. ' + c.prots.join(', '));
+    if (c.nfs.length) extra.push('NF ' + c.nfs.join(', '));
+    return h('td', { class: 'bloq-rel-bloqueio', rowspan: span }, [
+      h('span', { class: 'num bloq-rel-numero' }, copiavel(milhar(c.b), c.b, 'Bloqueio')),
+      extra.map(function (t) { return h('span', { class: 'bloq-rel-cod num' }, t); })
+    ].reduce(function (a, x) { return a.concat(x); }, []));
+  }
+  /** Texto curto para colar no WhatsApp ou no e-mail. */
+  function textoEstoque() {
+    var v = resumoVisivel();
+    var dia = (st.dados.lidoEm || '').slice(0, 10);
+    var l = ['*Materiais bloqueados - ' + dia + '*', plural(v.bloqueios, 'bloqueio', 'bloqueios') + ', ' + plural(v.produtos, 'produto', 'produtos'), ''];
+    v.grupos.forEach(function (g) {
+      l.push('*' + linhaResumoEstoque(g) + '*', g.acao);
+      if (g.situacoes.length > 1) l.push(textoSituacoes(g));
+      l.push('');
+    });
+    l.push('*Onde está:* ' + v.locais);
+    return l.join('\n');
+  }
+  function tabelaGrupo(g) {
+    var corpo = [];
+    g.cartoes.forEach(function (c) {
+      var selos = (cartaoPorChave(c.b) || {}).selos || [];
+      c.itens.forEach(function (i, n) {
+        var span = c.itens.length > 1 ? String(c.itens.length) : null;
+        corpo.push(h('tr', { class: n === 0 ? 'bloq-rel-inicio' : '' }, [
+          n === 0 ? celulaBloqueio(c, span) : null,
+          h('td', {}, [h('span', { class: 'bloq-rel-prod' }, copiavel(i.nome, i.nome, 'Item')), h('span', { class: 'bloq-rel-cod' }, copiavel('Cód. ' + i.cod, i.cod, 'Código'))]),
+          h('td', { class: 'num bloq-rel-dir' }, SR.num(i.qtd) + (i.un ? ' ' + i.un : '')),
+          h('td', {}, i.local || '—'),
+          n === 0 ? h('td', { class: 'num bloq-rel-dir', rowspan: span }, String(c.dias)) : null,
+          n === 0 ? h('td', { rowspan: span }, etiquetas(c, selos)) : null
+        ]));
+      });
+    });
+    return h('div', { class: 'bloq-rel-rolagem' }, h('table', { class: 'bloq-rel-tabela' }, [
+      h('thead', {}, h('tr', {}, [h('th', {}, 'Bloqueio'), h('th', {}, 'Produto'), h('th', { class: 'bloq-rel-dir' }, 'Qtd.'), h('th', {}, 'Local'), h('th', { class: 'bloq-rel-dir' }, 'Dias'), h('th', {}, 'Situação e selos')])),
+      h('tbody', {}, corpo)
+    ]));
+  }
+  function cartaoPorChave(chave) {
+    return st.dados.abertos.concat(st.dados.baixados).filter(function (c) { return c.chave === chave; })[0];
+  }
+  function renderRelatorio() {
+    var e = st.dados.estoque, v = resumoVisivel(), filtrando = filtroAtivo(), alvo = limpar($('bloqRelatorio'));
+    alvo.appendChild(h('div', { class: 'bloq-rel-acoes' }, [
+      h('button', { type: 'button', class: 'btn leve pequeno', onclick: function () { mostrarRelatorio(false); } }, 'Voltar ao quadro'),
+      h('button', { type: 'button', class: 'btn leve pequeno', onclick: function () { SRHome.copiar(textoEstoque(), 'Resumo'); } }, 'Copiar resumo'),
+      h('button', { type: 'button', class: 'btn primario pequeno', onclick: function () { window.print(); } }, 'Imprimir ou salvar PDF')
+    ]));
+    alvo.appendChild(h('header', { class: 'bloq-rel-topo' }, [
+      h('h2', {}, 'Materiais bloqueados'),
+      h('p', {}, 'Situação em ' + st.dados.lidoEm + ' · Santri emitido em ' + (st.dados.emitido || 'data não informada'))
+    ]));
+    alvo.appendChild(h('div', { class: 'bloq-rel-total' }, [
+      h('p', {}, [h('strong', { class: 'num' }, String(v.bloqueios)), v.bloqueios === 1 ? ' bloqueio com ' : ' bloqueios com ', h('strong', { class: 'num' }, String(v.produtos)), v.produtos === 1 ? ' produto' : ' produtos',
+        filtrando ? ' neste filtro, de ' + e.bloqueios + ' bloqueios na pilha.' : ' na pilha.']),
+      h('p', { class: 'bloq-rel-locais' }, 'Onde está: ' + v.locais + '.')
+    ]));
+    var ajuda = h('div', { class: 'bloq-rel-filtro' }, [
+      h('span', {}, filtrando ? 'Clique nos blocos para escolher o que entra.' : 'Clique em um bloco para filtrar a lista. Dá para escolher mais de um.'),
+      filtrando ? h('button', { type: 'button', class: 'link', onclick: function () { st.relGrupos = {}; renderRelatorio(); } }, 'Mostrar todos') : null
+    ]);
+    alvo.appendChild(ajuda);
+    alvo.appendChild(h('div', { class: 'bloq-rel-grupos' }, e.grupos.map(function (g) {
+      var marcado = !!st.relGrupos[g.id];
+      return h('button', {
+        type: 'button', class: 'bloq-rel-card' + (filtrando && !marcado ? ' fora-filtro' : ''), 'data-grupo': g.id, 'aria-pressed': String(marcado),
+        onclick: function () { alternarGrupo(g.id); }
+      }, [
+        h('strong', { class: 'num bloq-qtd-grande ' + g.tom }, String(g.cartoes.length)),
+        h('span', { class: 'bloq-rel-card-texto' }, [h('strong', {}, g.titulo), h('span', {}, g.acao)])
+      ]);
+    })));
+    v.grupos.forEach(function (g) {
+      alvo.appendChild(h('section', { class: 'bloq-rel-grupo' }, [
+        h('h3', {}, [g.titulo, h('span', { class: 'bloq-qtd ' + g.tom }, String(g.cartoes.length))]),
+        h('p', {}, g.acao),
+        g.situacoes.length > 1 ? h('p', { class: 'bloq-rel-situacoes' }, textoSituacoes(g)) : null,
+        tabelaGrupo(g)
+      ]));
+    });
+    if (e.fora) {
+      alvo.appendChild(h('p', { class: 'bloq-rel-nota' }, 'Não entram nesta lista ' + e.fora + ' bloqueios ou ocorrências em andamento que não vieram no relatório do Santri' +
+        (e.foraColeta ? ', sendo ' + e.foraColeta + ' aguardando coleta' : '') + '. Para incluir, emita o relatório sem filtro de tipo.'));
+    }
+  }
+  function mostrarRelatorio(sim) {
+    st.relatorio = sim;
+    $('bloqResultado').classList.toggle('modo-relatorio', sim);
+    $('bloqRelatorio').classList.toggle('oculto', !sim);
+    $('viewBloqueios').classList.toggle('larga', !sim);
+    if (sim) renderRelatorio(); else render();
+    window.scrollTo(0, 0);
+  }
+
+  function renderFiltroSelo() {
+    var sel = $('bloqSelo');
+    limpar(sel).appendChild(h('option', { value: '' }, 'Selos'));
+    st.dados.selosOpcoes.forEach(function (s) { sel.appendChild(h('option', { value: s }, s)); });
+    if (st.dados.selosOpcoes.indexOf(st.selo) < 0) st.selo = '';
+    sel.value = st.selo;
+  }
+
+  function render() {
+    renderAbas();
+    renderResumo();
+    renderFornecedores();
+    renderFiltroSelo();
+    renderQuadro();
+  }
+
+  function mostrarResultado(d) {
+    ['abertos', 'baixados', 'fora'].forEach(function (k) {
+      d[k].forEach(function (c) {
+        c.aba = k;
+        c.chave = c.b || 'P' + (c.occ[0] ? c.occ[0].prot : '');
+        c.selos = d.selos[c.chave] || [];
+        c._busca = textoBusca(c);
+      });
+    });
+    st.dados = d;
+    st.desatualizado = false;
+    $('bloqOrigem').textContent = 'Santri emitido em ' + (d.emitido || 'data não informada') + ' · DATABASE lida em ' + d.lidoEm + ' · ' + st.arquivo.nome;
+    var aviso = limpar($('bloqAviso'));
+    var dia = (d.emitido || '').slice(0, 10).split('/').reverse().join('-');
+    if (dia && dia !== d.hoje) aviso.appendChild(SR.msg('aviso', 'O relatório foi emitido em ' + d.emitido + '. Baixas feitas depois disso não aparecem aqui.'));
+    $('bloqEnvio').classList.add('oculto');
+    $('bloqResultado').classList.remove('oculto');
+    $('viewBloqueios').classList.toggle('larga', !st.relatorio);
+    if (st.relatorio) renderRelatorio(); else render();
+  }
+
+  function mostrarEnvio() {
+    st.dados = null; st.arquivo = null; st.aba = 'abertos'; st.busca = ''; st.forn = ''; st.selo = '';
+    st.relatorio = false;
+    st.relGrupos = {};
+    $('bloqResultado').classList.remove('modo-relatorio');
+    $('bloqRelatorio').classList.add('oculto');
+    $('bloqBusca').value = '';
+    $('bloqArquivo').value = '';
+    limpar($('bloqErro'));
+    $('bloqResultado').classList.add('oculto');
+    $('bloqEnvio').classList.remove('oculto');
+    $('viewBloqueios').classList.remove('larga');
+  }
+
+  function falha(e) {
+    var alvo = st.dados ? limpar($('bloqAviso')) : limpar($('bloqErro'));
+    alvo.appendChild(SR.msg('erro', SR.erroServidor(e)));
+  }
+
+  /** Na tela de envio o progresso é dela: nome do arquivo e segundos correndo, para não parecer travada. */
+  var relogio = null;
+  function mostrarProgresso(sim) {
+    clearInterval(relogio);
+    var alvo = limpar($('bloqProgresso'));
+    $('bloqZona').classList.toggle('oculto', sim);
+    alvo.classList.toggle('oculto', !sim);
+    if (!sim) return;
+    var inicio = Date.now(), segundos = h('span', { class: 'bloq-progresso-tempo num' }, '0 s');
+    alvo.appendChild(h('span', { class: 'giro-mini', 'aria-hidden': 'true' }));
+    alvo.appendChild(h('div', {}, [
+      h('strong', {}, 'Cruzando o relatório com as ocorrências…'),
+      h('div', { class: 'item-meta' }, [st.arquivo.nome + ' · ', segundos])
+    ]));
+    relogio = setInterval(function () { segundos.textContent = Math.floor((Date.now() - inicio) / 1000) + ' s'; }, 1000);
+  }
+
+  function analisar() {
+    limpar($('bloqErro'));
+    if (st.dados) {
+      SR.chamar('analisarBloqueios', [st.arquivo], 'Cruzando bloqueios com as ocorrências…').then(mostrarResultado).catch(falha);
+      return;
+    }
+    mostrarProgresso(true);
+    new Promise(function (ok, erro) {
+      google.script.run.withSuccessHandler(ok).withFailureHandler(erro).analisarBloqueios(st.arquivo);
+    }).then(function (d) {
+      mostrarProgresso(false);
+      mostrarResultado(d);
+    }).catch(function (e) {
+      mostrarProgresso(false);
+      $('bloqArquivo').value = ''; // permite escolher o mesmo arquivo de novo
+      falha(e);
+    });
+  }
+
+  function escolher(file) {
+    limpar($('bloqErro'));
+    if (!file) return;
+    if (!/\.ods$/i.test(file.name)) { $('bloqErro').appendChild(SR.msg('erro', 'Envie o relatório no formato .ods, como sai do Santri.')); return; }
+    if (file.size > LIMITE_BYTES) { $('bloqErro').appendChild(SR.msg('erro', 'Arquivo grande demais para este relatório.')); return; }
+    var leitor = new FileReader();
+    leitor.onload = function () {
+      st.arquivo = { nome: file.name, base64: String(leitor.result).split(',')[1] };
+      analisar();
+    };
+    leitor.onerror = function () { $('bloqErro').appendChild(SR.msg('erro', 'Não consegui ler o arquivo. Tente de novo.')); };
+    leitor.readAsDataURL(file);
+  }
+
+  var zona = $('bloqZona');
+  zona.addEventListener('click', function () { $('bloqArquivo').click(); });
+  zona.addEventListener('keydown', function (ev) { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); $('bloqArquivo').click(); } });
+  ['dragenter', 'dragover'].forEach(function (n) { zona.addEventListener(n, function (ev) { ev.preventDefault(); zona.classList.add('arrastando'); }); });
+  ['dragleave', 'drop'].forEach(function (n) { zona.addEventListener(n, function (ev) { ev.preventDefault(); zona.classList.remove('arrastando'); }); });
+  zona.addEventListener('drop', function (ev) { escolher(ev.dataTransfer.files[0]); });
+  $('bloqArquivo').addEventListener('click', function (ev) { ev.stopPropagation(); });
+  $('bloqArquivo').addEventListener('change', function (ev) { escolher(ev.target.files[0]); });
+
+  $('btnBloqueios').addEventListener('click', function () { SR.irPara('bloqueios'); });
+  $('btnVoltarBloqueios').addEventListener('click', function () { SR.irPara('home'); });
+  $('btnTrocarRelatorio').addEventListener('click', mostrarEnvio);
+  $('btnRelatorioEstoque').addEventListener('click', function () { mostrarRelatorio(true); });
+  $('btnAtualizarBloqueios').addEventListener('click', function () { limpar($('bloqAviso')); analisar(); });
+  $('bloqBusca').addEventListener('input', function (ev) { st.busca = ev.target.value; renderQuadro(); });
+  $('bloqFornecedor').addEventListener('change', function (ev) { st.forn = ev.target.value; renderQuadro(); });
+  $('bloqSelo').addEventListener('change', function (ev) { st.selo = ev.target.value; renderQuadro(); });
+  $('bloqOrdem').addEventListener('change', function (ev) { st.ordem = ev.target.value; renderQuadro(); });
+  window.addEventListener('resize', ajustarAltura);
+
+  // Mudou uma ocorrência pelo painel: o quadro ainda mostra a leitura anterior.
+  document.addEventListener('sr-ocorrencia-alterada', function () {
+    if (!st.dados || $('viewBloqueios').classList.contains('oculto')) return;
+    limpar($('bloqAviso')).appendChild(SR.msg('aviso', 'Uma ocorrência mudou depois desta leitura. Clique em Atualizar ocorrências para ver o quadro em dia.'));
+    ajustarAltura();
+  });
+
+  window.SRBloqueios = {
+    rascunhoDasLinhas: rascunhoDasLinhas,
+    /** Depois de registrar: o quadro relê a planilha quando a pessoa voltar para ele. */
+    desatualizar: function () { st.desatualizado = !!st.arquivo; },
+    aoVoltar: function () { if (st.desatualizado && st.arquivo) { st.desatualizado = false; limpar($('bloqAviso')); analisar(); } }
+  };
+})();
+</script>

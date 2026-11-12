@@ -1,0 +1,11 @@
+node_modules/
+*.xml
+*.ods
+*.xlsx
+*.csv
+.env
+.clasprc.json
+.claude/
+*.log
+Thumbs.db
+.DS_Store

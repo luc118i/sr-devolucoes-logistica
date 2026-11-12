@@ -1,0 +1,213 @@
+<script>
+/**
+ * Menu suspenso do design system: substitui VISUALMENTE todo <select> da tela.
+ * O <select> original continua no lugar (escondido) — o código existente segue lendo/alterando
+ * sel.value e ouvindo "change" normalmente. Selects criados depois são aprimorados automaticamente.
+ * Acessível: botão role="combobox" + lista role="listbox"; setas, Home/End, Enter, Esc e busca por letra.
+ * No celular a lista abre como folha inferior.
+ */
+(function () {
+  'use strict';
+  var proto = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value');
+  var protoIdx = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'selectedIndex');
+  var aberto = null; // { sel, lista, veu, ativo }
+  var seq = 0;
+
+  function tomStatus(texto) {
+    var n = String(texto || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase();
+    return !n ? '' : /FINALIZAD/.test(n) ? 'ok' : /AGUARDANDO/.test(n) ? 'aviso' : /VERIFICAR/.test(n) ? 'erro' : 'info';
+  }
+  function svgSeta() {
+    var ns = 'http://www.w3.org/2000/svg', s = document.createElementNS(ns, 'svg'), p = document.createElementNS(ns, 'path');
+    s.setAttribute('viewBox', '0 0 12 8'); s.setAttribute('aria-hidden', 'true'); s.setAttribute('class', 'seletor-seta');
+    p.setAttribute('d', 'M1 1.5l5 5 5-5'); p.setAttribute('fill', 'none'); p.setAttribute('stroke', 'currentColor');
+    p.setAttribute('stroke-width', '1.6'); p.setAttribute('stroke-linecap', 'round'); p.setAttribute('stroke-linejoin', 'round');
+    s.appendChild(p); return s;
+  }
+
+  function aprimorar(sel) {
+    if (sel._seletor || sel.multiple || sel.closest('.seletor-nativo')) return;
+    var id = 'sel' + (++seq);
+    var wrap = document.createElement('div');
+    wrap.className = 'seletor';
+    var botao = document.createElement('button');
+    botao.type = 'button';
+    botao.className = 'seletor-botao';
+    botao.id = id + 'b';
+    botao.setAttribute('role', 'combobox');
+    botao.setAttribute('aria-haspopup', 'listbox');
+    botao.setAttribute('aria-expanded', 'false');
+    var rotulo = sel.getAttribute('aria-label');
+    if (rotulo) botao.setAttribute('aria-label', rotulo);
+    var texto = document.createElement('span');
+    texto.className = 'seletor-texto';
+    botao.appendChild(texto);
+    botao.appendChild(svgSeta());
+    sel.parentNode.insertBefore(wrap, sel);
+    wrap.appendChild(botao);
+    wrap.appendChild(sel);
+    sel.classList.add('seletor-escondido');
+    sel.tabIndex = -1;
+    sel.setAttribute('aria-hidden', 'true');
+
+    var st = { sel: sel, botao: botao, texto: texto, wrap: wrap, id: id };
+    sel._seletor = st;
+
+    var atualizar = function () {
+      var op = sel.options[sel.selectedIndex];
+      var vazio = !op || op.value === '';
+      texto.textContent = op ? op.textContent : '';
+      texto.classList.toggle('placeholder', vazio);
+      botao.classList.toggle('invalido', sel.classList.contains('invalido'));
+      botao.disabled = sel.disabled;
+      var tom = sel.getAttribute('data-estilo') === 'status' && !vazio ? tomStatus(op.textContent) : '';
+      botao.setAttribute('data-tom', tom);
+    };
+    st.atualizar = atualizar;
+    // value/selectedIndex atribuídos por código também atualizam o botão
+    Object.defineProperty(sel, 'value', { configurable: true, get: function () { return proto.get.call(this); }, set: function (v) { proto.set.call(this, v); atualizar(); } });
+    Object.defineProperty(sel, 'selectedIndex', { configurable: true, get: function () { return protoIdx.get.call(this); }, set: function (v) { protoIdx.set.call(this, v); atualizar(); } });
+    sel.focus = function () { botao.focus(); };
+    new MutationObserver(atualizar).observe(sel, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'disabled'] });
+    sel.addEventListener('change', atualizar);
+
+    botao.addEventListener('click', function () { if (aberto && aberto.sel === sel) fechar(true); else abrir(st); });
+    botao.addEventListener('keydown', function (ev) {
+      if (['ArrowDown', 'ArrowUp', 'Enter', ' '].indexOf(ev.key) >= 0 && !(aberto && aberto.sel === sel)) { ev.preventDefault(); abrir(st); }
+    });
+    atualizar();
+  }
+
+  function abrir(st) {
+    fechar(false);
+    var sel = st.sel, celular = window.matchMedia('(max-width: 599px)').matches;
+    var lista = document.createElement('div');
+    lista.className = 'seletor-lista' + (celular ? ' folha' : '');
+    lista.id = st.id + 'l';
+    lista.setAttribute('role', 'listbox');
+    lista.tabIndex = -1;
+    var rot = st.botao.getAttribute('aria-label') || (st.wrap.closest('label') ? st.wrap.closest('label').firstChild.textContent : '');
+    if (rot) lista.setAttribute('aria-label', String(rot).replace(/\*/g, '').trim());
+    var itens = [];
+    Array.prototype.forEach.call(sel.options, function (op, i) {
+      var li = document.createElement('div');
+      li.className = 'seletor-opcao' + (op.value === '' ? ' placeholder' : '');
+      li.id = st.id + 'o' + i;
+      li.setAttribute('role', 'option');
+      li.setAttribute('aria-selected', String(i === sel.selectedIndex));
+      if (op.disabled) li.setAttribute('aria-disabled', 'true');
+      var tom = sel.getAttribute('data-estilo') === 'status' && op.value ? tomStatus(op.textContent) : '';
+      if (tom) { var p = document.createElement('span'); p.className = 'seletor-ponto ' + tom; li.appendChild(p); }
+      var t = document.createElement('span'); t.className = 'seletor-opcao-texto'; t.textContent = op.textContent; li.appendChild(t);
+      var c = document.createElement('span'); c.className = 'seletor-check'; c.setAttribute('aria-hidden', 'true'); c.textContent = '✓'; li.appendChild(c);
+      li.addEventListener('mousedown', function (ev) { ev.preventDefault(); });
+      li.addEventListener('click', function () { if (!op.disabled) escolher(i); });
+      li.addEventListener('mousemove', function () { marcarAtivo(i); });
+      lista.appendChild(li); itens.push(li);
+    });
+    var veu = null;
+    if (celular) {
+      veu = document.createElement('div'); veu.className = 'veu seletor-veu';
+      veu.addEventListener('click', function () { fechar(true); });
+      document.body.appendChild(veu);
+      if (rot) { var cab = document.createElement('div'); cab.className = 'seletor-titulo'; cab.textContent = String(rot).replace(/\*/g, '').trim(); lista.insertBefore(cab, lista.firstChild); }
+    }
+    document.body.appendChild(lista);
+    aberto = { sel: sel, st: st, lista: lista, veu: veu, itens: itens, ativo: -1, celular: celular, busca: '', buscaT: 0 };
+    st.botao.setAttribute('aria-expanded', 'true');
+    st.botao.setAttribute('aria-controls', lista.id);
+    posicionar();
+    marcarAtivo(sel.selectedIndex >= 0 ? sel.selectedIndex : 0, true);
+    lista.focus();
+    lista.addEventListener('keydown', teclas);
+  }
+
+  function posicionar() {
+    if (!aberto || aberto.celular) return;
+    var r = aberto.st.botao.getBoundingClientRect(), l = aberto.lista;
+    var abaixo = window.innerHeight - r.bottom - 8, acima = r.top - 8;
+    var alturaMax = Math.min(320, Math.max(abaixo, acima));
+    l.style.minWidth = r.width + 'px';
+    l.style.maxWidth = Math.max(r.width, Math.min(480, window.innerWidth - 16)) + 'px';
+    l.style.maxHeight = alturaMax + 'px';
+    var left = Math.min(r.left, window.innerWidth - l.offsetWidth - 8);
+    l.style.left = Math.max(8, left) + 'px';
+    var h = Math.min(l.scrollHeight, alturaMax);
+    if (abaixo >= Math.min(h, 200) || abaixo >= acima) { l.style.top = (r.bottom + 6) + 'px'; l.classList.remove('acima'); }
+    else { l.style.top = (r.top - h - 6) + 'px'; l.classList.add('acima'); }
+  }
+
+  function marcarAtivo(i, rolar) {
+    if (!aberto) return;
+    var it = aberto.itens;
+    if (aberto.ativo >= 0 && it[aberto.ativo]) it[aberto.ativo].classList.remove('ativo');
+    aberto.ativo = Math.max(0, Math.min(it.length - 1, i));
+    var el = it[aberto.ativo];
+    if (!el) return;
+    el.classList.add('ativo');
+    aberto.lista.setAttribute('aria-activedescendant', el.id);
+    if (rolar) el.scrollIntoView({ block: 'nearest' });
+  }
+
+  function escolher(i) {
+    if (!aberto) return;
+    var sel = aberto.sel, mudou = sel.selectedIndex !== i;
+    protoIdx.set.call(sel, i);
+    aberto.st.atualizar();
+    fechar(true);
+    if (mudou) sel.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  function teclas(ev) {
+    if (!aberto) return;
+    var n = aberto.itens.length;
+    var proximo = function (de, passo) {
+      for (var k = 1; k <= n; k++) { var j = de + passo * k; if (j < 0 || j >= n) break; if (aberto.itens[j].getAttribute('aria-disabled') !== 'true') return j; }
+      return de;
+    };
+    if (ev.key === 'ArrowDown') { ev.preventDefault(); marcarAtivo(proximo(aberto.ativo, 1), true); }
+    else if (ev.key === 'ArrowUp') { ev.preventDefault(); marcarAtivo(proximo(aberto.ativo, -1), true); }
+    else if (ev.key === 'Home') { ev.preventDefault(); marcarAtivo(0, true); }
+    else if (ev.key === 'End') { ev.preventDefault(); marcarAtivo(n - 1, true); }
+    else if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); escolher(aberto.ativo); }
+    else if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); fechar(true); }
+    else if (ev.key === 'Tab') { fechar(false); }
+    else if (ev.key.length === 1) {
+      clearTimeout(aberto.buscaT);
+      aberto.busca += ev.key.toLowerCase();
+      aberto.buscaT = setTimeout(function () { if (aberto) aberto.busca = ''; }, 700);
+      var b = aberto.busca;
+      var achou = aberto.itens.findIndex(function (li) { return li.textContent.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').indexOf(b) === 0; });
+      if (achou >= 0) marcarAtivo(achou, true);
+    }
+  }
+
+  function fechar(devolverFoco) {
+    if (!aberto) return;
+    var a = aberto; aberto = null;
+    a.lista.remove(); if (a.veu) a.veu.remove();
+    a.st.botao.setAttribute('aria-expanded', 'false');
+    a.st.botao.removeAttribute('aria-controls');
+    if (devolverFoco) a.st.botao.focus();
+  }
+
+  document.addEventListener('mousedown', function (ev) {
+    if (!aberto) return;
+    if (aberto.lista.contains(ev.target) || aberto.st.botao.contains(ev.target)) return;
+    fechar(false);
+  }, true);
+  window.addEventListener('resize', function () { fechar(false); });
+  document.addEventListener('scroll', function (ev) { if (aberto && !aberto.lista.contains(ev.target)) posicionar(); }, true);
+
+  // Aprimora os selects que já existem e os que forem criados depois.
+  function varrer(raiz) {
+    if (raiz.tagName === 'SELECT') aprimorar(raiz);
+    if (raiz.querySelectorAll) Array.prototype.forEach.call(raiz.querySelectorAll('select'), aprimorar);
+  }
+  new MutationObserver(function (muts) {
+    muts.forEach(function (m) { Array.prototype.forEach.call(m.addedNodes, function (n) { if (n.nodeType === 1) varrer(n); }); });
+  }).observe(document.body, { childList: true, subtree: true });
+  varrer(document.body);
+  window.SRSeletor = { aprimorar: aprimorar, fechar: fechar };
+})();
+</script>

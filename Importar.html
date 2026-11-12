@@ -1,0 +1,313 @@
+<script>
+/**
+ * Importação de ocorrência a partir do e-mail da equipe de entrada de notas.
+ * Importar (colar) → Revisar (formulário preenchido + conferência com status por campo) →
+ * Confirmar (o "Revisar e registrar" de sempre). Nada é gravado aqui: o registro usa o fluxo existente.
+ */
+(function () {
+  'use strict';
+  var SR = window.SR, F = SR.form, h = SR.h, limpar = SR.limpar;
+  function $(id) { return document.getElementById(id); }
+  function semZ(s) { return String(s == null ? '' : s).replace(/\D/g, '').replace(/^0+(?=\d)/, ''); }
+  function dataBR(iso) { return iso ? iso.split('-').reverse().join('/') : ''; }
+
+  var STATUS = {
+    ok: ['ok', 'Identificado'], ausente: ['neutro', 'Ausente'], confirmar: ['aviso', 'Confirmar'],
+    conflito: ['erro', 'Conflito'], info: ['info', 'Não gravado']
+  };
+  var htmlColado = '';
+  var atual = null; // último resultado aplicado
+
+  // ── abas: Buscar pela nota | Importar e-mail ──
+  function mostrarAba(qual) {
+    var email = qual === 'email';
+    $('abaNota').setAttribute('aria-selected', String(!email));
+    $('abaEmail').setAttribute('aria-selected', String(email));
+    $('abaNota').tabIndex = email ? -1 : 0; $('abaEmail').tabIndex = email ? 0 : -1;
+    $('painelNota').classList.toggle('oculto', email);
+    $('painelEmail').classList.toggle('oculto', !email);
+    if (email) $('textoEmail').focus(); else $('numNota').focus();
+  }
+  $('abaNota').addEventListener('click', function () { mostrarAba('nota'); });
+  $('abaEmail').addEventListener('click', function () { mostrarAba('email'); });
+  [$('abaNota'), $('abaEmail')].forEach(function (b) {
+    b.addEventListener('keydown', function (ev) {
+      if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft') { ev.preventDefault(); mostrarAba(b.id === 'abaNota' ? 'email' : 'nota'); (b.id === 'abaNota' ? $('abaEmail') : $('abaNota')).focus(); }
+    });
+  });
+
+  // ── colagem: guarda o HTML (ajuda a achar a opção marcada) e não deixa virar "foto" ──
+  $('textoEmail').addEventListener('paste', function (ev) {
+    ev.stopPropagation(); // o Ctrl+V de fotos não captura imagens de assinatura do e-mail
+    var cd = ev.clipboardData;
+    htmlColado = cd ? (cd.getData('text/html') || '') : '';
+    $('infoColagem').textContent = htmlColado ? 'Formatação do e-mail capturada.' : '';
+  });
+  $('textoEmail').addEventListener('input', function () { if (!this.value.trim()) { htmlColado = ''; $('infoColagem').textContent = ''; } });
+  $('btnLimparEmail').addEventListener('click', function () {
+    $('textoEmail').value = ''; htmlColado = ''; $('infoColagem').textContent = '';
+    $('secImportacao').classList.add('oculto');
+    $('textoEmail').focus();
+  });
+
+  $('btnInterpretar').addEventListener('click', function () {
+    var texto = $('textoEmail').value;
+    if (!texto.trim() && !htmlColado) {
+      limpar($('resultadoBusca')).appendChild(SR.msg('erro', 'Cole o e-mail completo (assunto e corpo) no campo acima.'));
+      return $('textoEmail').focus();
+    }
+    if (!F.confirmarDescarte()) return;
+    limpar($('resultadoBusca'));
+    SR.chamar('interpretarEmail', [texto, htmlColado], 'Interpretando o e-mail…').then(function (res) {
+      res.textoOriginal = texto.trim() || textoDoHtml(htmlColado);
+      aplicar(res);
+    }).catch(function (e) {
+      limpar($('resultadoBusca')).appendChild(SR.msg('erro', 'Não foi possível interpretar o e-mail: ' + SR.erroServidor(e) + ' O texto colado continua aqui.'));
+    });
+  });
+
+  function textoDoHtml(html) {
+    try { return new DOMParser().parseFromString(html, 'text/html').body.innerText || ''; } catch (e) { return ''; }
+  }
+
+  // ── destaque dos campos preenchidos pela importação ──
+  function marcar(id, status) {
+    var el = $(id);
+    el.classList.remove('imp-ok', 'imp-atencao', 'imp-conflito');
+    el.classList.add(status === 'ok' ? 'imp-ok' : status === 'conflito' ? 'imp-conflito' : 'imp-atencao');
+    var tirar = function () { el.classList.remove('imp-ok', 'imp-atencao', 'imp-conflito'); };
+    el.addEventListener('input', tirar, { once: true });
+    el.addEventListener('change', tirar, { once: true });
+  }
+  function limparMarcas() {
+    document.querySelectorAll('.imp-ok, .imp-atencao, .imp-conflito').forEach(function (el) { el.classList.remove('imp-ok', 'imp-atencao', 'imp-conflito'); });
+  }
+
+  // ── aplicar ao formulário existente ──
+  function aplicar(res) {
+    var r = res.interpretacao, c = r.campos, nota = res.nota;
+    res.hoje = (F.estado.cfg && F.estado.cfg.hoje) || res.hoje; // mesma "hoje" do formulário
+    limparMarcas();
+    F.limparBloqueio(); // o e-mail manda: não mistura com um bloqueio escolhido antes
+    if (nota) F.carregarNota(nota); else F.iniciarManual(c.nf.valor);
+    F.estado.itens.forEach(function (i) { i.marcado = false; i.impNota = ''; });
+    var linhasGerais = [];
+
+    // NF
+    if (!nota) $('fNf').value = c.nf.valor;
+    marcar('fNf', c.nf.valor ? c.nf.status : 'ausente');
+    linhasGerais.push(['Nota fiscal', c.nf, nota ? 'fNf' : 'fNf']);
+
+    // Fornecedor (com XML: o da nota manda; diferença vira conflito)
+    var forn = c.fornecedor;
+    if (nota) {
+      if (forn.valor && SR.normalizar(forn.valor) !== SR.normalizar(nota.fornecedor)) {
+        forn = { valor: nota.fornecedor, status: 'conflito', nota: 'E-mail: "' + c.fornecedor.valor + '"; XML da nota: "' + nota.fornecedor + '". Ficou o da nota.', alternativas: [nota.fornecedor, c.fornecedor.valor] };
+      } else if (!forn.valor) forn = { valor: nota.fornecedor, status: 'ok', nota: 'Do XML da nota (o e-mail não informa).' };
+    } else $('fFornecedor').value = forn.valor;
+    marcar('fFornecedor', forn.valor ? forn.status : 'ausente');
+    linhasGerais.push(['Fornecedor', forn, 'fFornecedor']);
+
+    // Pedido (confere com o XML quando houver)
+    var ped = c.pedido;
+    if (ped.valor) {
+      $('fPedido').value = ped.valor;
+      if (nota && nota.pedidos.length && nota.pedidos.map(semZ).indexOf(semZ(ped.valor)) < 0) {
+        ped = { valor: ped.valor, status: 'conflito', nota: 'O XML da nota cita o pedido ' + nota.pedidos.join(', ') + '.', alternativas: [ped.valor].concat(nota.pedidos) };
+      }
+    } else if (nota && nota.pedidos.length) {
+      ped = { valor: nota.pedidos[0], status: nota.pedidos.length === 1 ? 'ok' : 'confirmar', nota: 'Do XML da nota (o e-mail não informa).', alternativas: nota.pedidos.length > 1 ? nota.pedidos : null };
+      $('fPedido').value = ped.valor;
+    } else $('fPedido').value = '';
+    marcar('fPedido', ped.valor ? ped.status : 'ausente');
+    linhasGerais.push(['N° Pedido', ped, 'fPedido']);
+
+    // Bloqueio
+    $('fBloqueio').value = c.bloqueio.valor;
+    marcar('fBloqueio', c.bloqueio.valor ? c.bloqueio.status : 'ausente');
+    linhasGerais.push(['Bloqueio', c.bloqueio, 'fBloqueio']);
+
+    // Conferente: só o que o e-mail disser (não fica o lembrado de outra ocorrência)
+    if (c.conferente.status === 'ok' && F.definirConferente(c.conferente.valor)) marcar('fConferente', 'ok');
+    else { $('fConferente').value = ''; marcar('fConferente', c.conferente.valor ? 'confirmar' : 'ausente'); }
+    linhasGerais.push(['Conferente', c.conferente, 'fConferente']);
+
+    // Data: explícita no e-mail; senão a regra padrão (hoje) e a data de envio fica como opção
+    var dt = c.data;
+    if (dt.status === 'ok') { $('fData').value = dt.valor; marcar('fData', 'ok'); }
+    else {
+      $('fData').value = res.hoje;
+      dt = { valor: res.hoje, status: dt.dataEnvio && dt.dataEnvio !== res.hoje ? 'confirmar' : 'ausente', nota: dt.nota, dataEnvio: dt.dataEnvio, padrao: true };
+      marcar('fData', 'confirmar');
+    }
+    linhasGerais.push(['Data da ocorrência', dt, 'fData']);
+
+    // Valor nunca vem no e-mail
+    $('fValor').value = '';
+    marcar('fValor', 'ausente');
+    linhasGerais.push(['Valor', { valor: '', status: 'ausente', nota: 'O e-mail não traz o valor do bloqueio: informe (ou use "Sugerir").' }, 'fValor']);
+
+    linhasGerais.push(['E-mail formatado por', { valor: c.formatadoPor.valor, status: c.formatadoPor.valor ? 'info' : 'ausente', nota: c.formatadoPor.valor ? c.formatadoPor.nota : 'Não informado no e-mail.' }, null]);
+
+    // Produtos
+    var duplicadas = res.jaRegistradas || [];
+    var linhasItens = r.itens.map(function (ei, idx) {
+      var notas = [];
+      if (ei.status !== 'ok' && ei.nota) notas.push(ei.nota);
+      var alvo = null;
+      if (nota) {
+        alvo = F.estado.itens.filter(function (x) {
+          return !x.manual && ((ei.codIntegracao && semZ(x.codigo) === semZ(ei.codIntegracao) && semZ(ei.codIntegracao) !== '') ||
+            (ei.codProduto && x.sr && semZ(x.sr.codigo) === semZ(ei.codProduto)));
+        })[0] || null;
+      }
+      if (alvo && alvo.marcado) notas.push('O e-mail cita este item da nota mais de uma vez — confira as quantidades.');
+      if (!alvo) {
+        alvo = {
+          chave: 'e' + idx + '_' + Date.now(), manual: true, nItem: null, codigo: ei.codIntegracao || '', ean: '',
+          descricao: ei.sr ? ei.sr.nome : (ei.descricao || ei.bruto), unidade: '', quantidade: null, valorUnitario: 0,
+          sr: ei.sr ? { codigo: ei.sr.codigo, nome: ei.sr.nome, marca: ei.sr.marca, via: 'email' } : null,
+          marcado: true, tipo: '', qtd: 1, obs: ''
+        };
+        if (nota) notas.push('Produto não encontrado no XML da nota — confira.');
+        F.estado.itens.push(alvo);
+      } else {
+        if (ei.sr && alvo.sr && alvo.sr.codigo !== ei.sr.codigo) notas.push('O e-mail cita o SR ' + ei.codProduto + ', mas na nota este item é o SR ' + alvo.sr.codigo + '.');
+        if (ei.sr && !alvo.sr) alvo.sr = { codigo: ei.sr.codigo, nome: ei.sr.nome, marca: ei.sr.marca, via: 'email' };
+        if (alvo.quantidade != null && Number(ei.qtd) > alvo.quantidade) notas.push('Quantidade do e-mail (' + ei.qtd + ') maior que a da nota (' + alvo.quantidade + ').');
+      }
+      alvo.marcado = true;
+      alvo.qtd = ei.qtd && Number(ei.qtd) > 0 ? ei.qtd : '';
+      alvo.tipo = ei.tipo.status === 'ok' || ei.tipo.status === 'conflito' ? ei.tipo.valor : '';
+      if (ei.tipo.status !== 'ok' && ei.tipo.nota) notas.push(ei.tipo.nota);
+      if (ei.obs) alvo.obs = ei.obs;
+      var srCod = alvo.sr ? alvo.sr.codigo : ei.codProduto;
+      var dup = duplicadas.filter(function (d) { return semZ(d.codProduto) === semZ(srCod) && (!alvo.tipo || SR.normalizar(d.tipo) === SR.normalizar(alvo.tipo)); });
+      if (dup.length) notas.push('Possível duplicidade: já registrado na linha ' + dup.map(function (d) { return d.linha; }).join(', ') + '.');
+      alvo.impNota = notas.join(' ');
+      return { ei: ei, alvo: alvo, notas: notas };
+    });
+    F.renderItens();
+
+    atual = { res: res, gerais: linhasGerais, itens: linhasItens };
+    renderResumo();
+    $('secImportacao').classList.remove('oculto');
+    setTimeout(function () { $('secImportacao').scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 80);
+  }
+
+  // ── resumo da conferência ──
+  function selo(status) { var s = STATUS[status] || STATUS.confirmar; return h('span', { class: 'selo ' + s[0] }, s[1]); }
+  function botaoEscolha(texto, acao) { return h('button', { type: 'button', class: 'btn leve pequeno', onclick: acao }, texto); }
+
+  function renderResumo() {
+    var res = atual.res, r = res.interpretacao;
+    var box = limpar($('resumoImportacao'));
+    var cont = { ok: 0, confirmar: 0, conflito: 0, ausente: 0 };
+    atual.gerais.forEach(function (g) { if (cont[g[1].status] != null) cont[g[1].status]++; });
+    atual.itens.forEach(function (x) { var s = x.notas.length ? (x.ei.tipo.status === 'conflito' ? 'conflito' : 'confirmar') : 'ok'; cont[s]++; });
+
+    box.appendChild(h('div', { class: 'imp-contagem' }, [
+      h('span', { class: 'selo ok' }, cont.ok + ' identificado(s)'),
+      cont.confirmar ? h('span', { class: 'selo aviso' }, cont.confirmar + ' a confirmar') : null,
+      cont.conflito ? h('span', { class: 'selo erro' }, cont.conflito + ' em conflito') : null,
+      cont.ausente ? h('span', { class: 'selo neutro' }, cont.ausente + ' ausente(s)') : null
+    ]));
+
+    if (r.avisos.length) box.appendChild(SR.msg('aviso', 'Atenção:', r.avisos));
+    if (res.notaStatus === 'XML') box.appendChild(SR.msg('ok', 'XML da nota encontrado: produtos e quantidades conferidos com a nota.'));
+    else if (res.notaStatus === 'SEM_XML' || res.notaStatus === 'VARIAS') box.appendChild(SR.msg('aviso', res.avisoNota || 'XML da nota não encontrado na pasta: o registro segue sem XML, com os produtos pelo cadastro.'));
+    if ((res.jaRegistradas || []).length) {
+      box.appendChild(SR.msg('aviso', 'Esta NF já tem ' + res.jaRegistradas.length + ' ocorrência(s) registrada(s):', res.jaRegistradas.map(function (o) {
+        return 'Linha ' + o.linha + ' · ' + o.data + ' · ' + (o.produto || o.codProduto || o.codIntegracao) + ' · ' + o.tipo + ' · qtd ' + o.qtd;
+      })));
+    }
+
+    // Dados da nota
+    box.appendChild(h('div', { class: 'imp-grupo' }, [h('h3', {}, 'Dados da nota'), h('div', { class: 'imp-linhas' }, atual.gerais.map(linhaGeral))]));
+
+    // Produtos
+    var itensEls = atual.itens.length ? atual.itens.map(linhaItem)
+      : [h('div', { class: 'imp-linha confirmar' }, [h('span', { class: 'imp-rotulo' }, 'Produtos'), h('span', { class: 'imp-valor vazio' }, 'Nenhum produto reconhecido no e-mail'), selo('confirmar'),
+          h('span', { class: 'imp-nota' }, 'Marque os produtos na lista abaixo (passo 3) ou adicione pelo cadastro.')])];
+    box.appendChild(h('div', { class: 'imp-grupo' }, [h('h3', {}, 'Produtos (' + atual.itens.length + ')'), h('div', { class: 'imp-linhas' }, itensEls)]));
+
+    if (r.informativos.length) box.appendChild(h('div', { class: 'imp-grupo' }, [h('h3', {}, 'Informações do e-mail'),
+      h('ul', { class: 'item-meta', style: 'margin:0;padding-left:18px' }, r.informativos.map(function (t) { return h('li', {}, t); }))]));
+
+    var orig = h('details', { class: 'original-email' }, [h('summary', {}, 'Ver e-mail original'), h('pre', {}, res.textoOriginal || '')]);
+    if (window.matchMedia('(min-width: 1024px)').matches) orig.open = true;
+    box.appendChild(orig);
+    box.appendChild(h('p', { class: 'item-meta', style: 'margin:12px 0 0' },
+      'Confira os campos destacados no formulário, complete o que falta e use "Revisar e registrar". Nada foi gravado ainda.'));
+  }
+
+  function linhaGeral(g) {
+    var rotulo = g[0], c = g[1], idCampo = g[2];
+    var valor = c.valor;
+    if (rotulo === 'Data da ocorrência') valor = dataBR(c.valor) + (c.padrao ? ' (padrão: hoje)' : '');
+    var filhos = [
+      h('span', { class: 'imp-rotulo' }, rotulo),
+      h('span', { class: 'imp-valor' + (valor ? '' : ' vazio') }, valor || 'não informado'),
+      selo(c.status)
+    ];
+    if (c.nota) filhos.push(h('span', { class: 'imp-nota' }, c.nota));
+    var escolhas = [];
+    (c.alternativas || []).forEach(function (alt) {
+      if (!idCampo || alt === $(idCampo).value) return;
+      escolhas.push(botaoEscolha('Usar ' + alt, function () {
+        if (idCampo === 'fConferente') F.definirConferente(alt); else $(idCampo).value = alt;
+        c.valor = alt; c.status = 'ok'; c.nota = 'Escolhido na conferência.'; marcar(idCampo, 'ok'); renderResumo();
+      }));
+    });
+    (c.sugestoes || []).forEach(function (s) {
+      escolhas.push(botaoEscolha('Usar ' + s, function () {
+        F.definirConferente(s); c.valor = s; c.status = 'ok'; c.nota = 'Escolhido na conferência.'; marcar('fConferente', 'ok'); renderResumo();
+      }));
+    });
+    if (rotulo === 'Data da ocorrência' && c.dataEnvio && c.dataEnvio !== $('fData').value) {
+      escolhas.push(botaoEscolha('Usar data do envio (' + dataBR(c.dataEnvio) + ')', function () {
+        $('fData').value = c.dataEnvio; c.valor = c.dataEnvio; c.padrao = false; c.status = 'ok'; c.nota = 'Data de envio do e-mail, escolhida na conferência.'; marcar('fData', 'ok'); renderResumo();
+      }));
+    }
+    if (idCampo && c.status !== 'ok' && c.status !== 'info') {
+      escolhas.push(botaoEscolha('Ir para o campo', function () { $(idCampo).focus(); $(idCampo).scrollIntoView({ behavior: 'smooth', block: 'center' }); }));
+    }
+    if (escolhas.length) filhos.push(h('div', { class: 'imp-escolhas' }, escolhas));
+    return h('div', { class: 'imp-linha ' + c.status }, filhos);
+  }
+
+  function linhaItem(x, i) {
+    var ei = x.ei, alvo = x.alvo;
+    var nome = alvo.sr ? 'SR ' + alvo.sr.codigo + ' — ' + alvo.sr.nome : (ei.descricao || ei.bruto);
+    var status = x.notas.length ? (ei.tipo.status === 'conflito' ? 'conflito' : 'confirmar') : 'ok';
+    var filhos = [
+      h('span', { class: 'imp-rotulo' }, 'Item ' + (i + 1)),
+      h('span', { class: 'imp-valor' }, (ei.qtd || '?') + ' × ' + nome + (ei.codIntegracao ? ' · integração ' + ei.codIntegracao : '') +
+        ' · ' + (alvo.tipo || 'tipo a escolher')),
+      selo(status)
+    ];
+    if (x.notas.length) filhos.push(h('span', { class: 'imp-nota' }, x.notas.join(' ')));
+    var escolhas = [];
+    if (!alvo.tipo || ei.tipo.status === 'conflito') {
+      (ei.tipo.alternativas || []).forEach(function (t) {
+        if (t === alvo.tipo) return;
+        escolhas.push(botaoEscolha(t, function () {
+          alvo.tipo = t; ei.tipo = { valor: t, status: 'ok' };
+          x.notas = x.notas.filter(function (n) { return !/categoria|tipo|opç|marcad/i.test(n); });
+          alvo.impNota = x.notas.join(' ');
+          F.renderItens(); renderResumo();
+        }));
+      });
+    }
+    if (ei.sugestaoSr && !alvo.sr) {
+      escolhas.push(botaoEscolha('Usar SR ' + ei.sugestaoSr.codigo + ' (histórico)', function () {
+        alvo.sr = { codigo: ei.sugestaoSr.codigo, nome: ei.sugestaoSr.nome, marca: ei.sugestaoSr.marca, via: 'historico' };
+        alvo.descricao = ei.sugestaoSr.nome;
+        F.renderItens(); renderResumo();
+      }));
+    }
+    if (escolhas.length) filhos.push(h('div', { class: 'imp-escolhas' }, escolhas));
+    return h('div', { class: 'imp-linha ' + status }, filhos);
+  }
+})();
+</script>

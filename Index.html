@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <meta name="theme-color" content="#FFFFFF">
+  <?!= incluir_('Estilo'); ?>
+</head>
+<body>
+  <a href="#conteudo" class="sr-only">Pular para o conteúdo</a>
+
+  <!-- Barra do app -->
+  <header class="app-bar">
+    <div class="app-bar-interno">
+      <button type="button" class="marca btn-reset" id="btnMarca" aria-label="Soreparos — ir para Ocorrências">
+        <img src="<?!= incluir_('Logo'); ?>" alt="Soreparos" width="104" height="20">
+        <span class="marca-divisor" aria-hidden="true"></span>
+        <span class="marca-nome"><?= CONFIG.NOME_APP ?></span>
+      </button>
+      <div class="app-bar-direita">
+        <button type="button" class="btn-icone" id="btnConfigEmail" aria-label="Configurações do e-mail" title="Configurações do e-mail">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 15a3 3 0 100-6 3 3 0 000 6z" stroke="currentColor" stroke-width="1.7"/><path d="M19.4 15a1.7 1.7 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.8-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.1-1.5 1.7 1.7 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.8 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1.1 1.7 1.7 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.8.3H9a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.8V9a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+        </button>
+        <span class="perfil" id="perfil" title="">
+          <span class="avatar" id="avatar" aria-hidden="true">·</span>
+          <span class="email" id="usuario"></span>
+        </span>
+      </div>
+    </div>
+  </header>
+
+  <main id="conteudo">
+    <!-- ═══════════════ HOME — Ocorrências ═══════════════ -->
+    <div class="pagina" id="viewHome">
+      <div class="pagina-topo">
+        <div>
+          <h1>Ocorrências</h1>
+          <p>Acompanhe e gerencie os registros</p>
+        </div>
+        <div class="pagina-acoes">
+          <button type="button" class="btn leve" id="btnBloqueios">Bloqueios</button>
+          <button type="button" class="btn primario" id="btnNovaOcorrencia">
+            <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 4v12M4 10h12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            Nova ocorrência
+          </button>
+        </div>
+      </div>
+
+      <div class="filtros" role="search">
+        <div class="periodo-wrap">
+          <button type="button" class="chip-periodo" id="btnPeriodo" aria-haspopup="dialog" aria-expanded="false" aria-controls="popPeriodo">
+            <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><rect x="3" y="4.5" width="14" height="12.5" rx="2.5" stroke="currentColor" stroke-width="1.6"/><path d="M3 8.5h14M7 2.8v3M13 2.8v3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+            <span class="rotulo" id="periodoRotulo">Esta semana</span>
+            <span class="faixa num" id="periodoFaixa"></span>
+            <svg class="seta" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M3 5l4 4 4-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <div class="popover oculto" id="popPeriodo" role="dialog" aria-label="Escolher período">
+            <h3>Atalhos</h3>
+            <div class="atalhos" id="atalhos">
+              <button type="button" class="atalho" data-preset="semana" aria-pressed="false">Esta semana</button>
+              <button type="button" class="atalho" data-preset="semanaAnterior" aria-pressed="false">Semana anterior</button>
+              <button type="button" class="atalho" data-preset="ultimos7" aria-pressed="false">Últimos 7 dias</button>
+              <button type="button" class="atalho" data-preset="mes" aria-pressed="false">Este mês</button>
+            </div>
+            <h3>Período personalizado</h3>
+            <div class="intervalo">
+              <label>De<input type="date" id="dataInicio"></label>
+              <label>Até<input type="date" id="dataFim"></label>
+            </div>
+            <div id="erroPeriodo"></div>
+            <div class="popover-acoes">
+              <button type="button" class="btn leve" id="btnLimparPeriodo">Limpar</button>
+              <button type="button" class="btn primario" id="btnAplicarPeriodo">Aplicar</button>
+            </div>
+          </div>
+        </div>
+        <div class="campo-busca">
+          <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="9" cy="9" r="5.5" stroke="currentColor" stroke-width="1.6"/><path d="M13.2 13.2L17 17" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+          <input type="search" id="buscaHome" placeholder="Buscar NF, fornecedor, produto…" aria-label="Buscar nas ocorrências do período">
+        </div>
+        <div class="modo-vista" id="modoVista" role="group" aria-label="Modo de exibição">
+          <button type="button" class="modo" data-modo="lista" aria-pressed="true">
+            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2.5 4h11M2.5 8h11M2.5 12h11" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>Lista
+          </button>
+          <button type="button" class="modo" data-modo="quadro" aria-pressed="false">
+            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="2" y="2.5" width="3.5" height="11" rx="1" stroke="currentColor" stroke-width="1.5"/><rect x="6.25" y="2.5" width="3.5" height="7" rx="1" stroke="currentColor" stroke-width="1.5"/><rect x="10.5" y="2.5" width="3.5" height="9" rx="1" stroke="currentColor" stroke-width="1.5"/></svg>Quadro
+          </button>
+        </div>
+      </div>
+
+      <div class="resumo-lista" id="resumoLista" aria-live="polite"></div>
+      <div class="lista-ocorrencias" id="listaOcorrencias" aria-busy="false"></div>
+    </div>
+
+    <!-- ═══════════════ NOVA OCORRÊNCIA ═══════════════ -->
+    <div class="pagina oculto" id="viewNova">
+      <button type="button" class="voltar" id="btnVoltarHome">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M10 3L5 8l5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Ocorrências
+      </button>
+      <div class="pagina-topo">
+        <div>
+          <h1>Nova ocorrência</h1>
+          <p>Busque a nota ou importe o e-mail, confira e registre.</p>
+        </div>
+      </div>
+
+      <!-- 1. Nota fiscal ou e-mail -->
+      <section class="cartao" id="secBusca" aria-labelledby="t1">
+        <h2 id="t1"><span class="passo">1</span> Origem da ocorrência</h2>
+        <div id="origemBloqueio"></div>
+        <div class="segmentado" role="tablist" aria-label="Como começar">
+          <button type="button" role="tab" id="abaNota" aria-selected="true" aria-controls="painelNota">Buscar pela nota</button>
+          <button type="button" role="tab" id="abaEmail" aria-selected="false" aria-controls="painelEmail">Importar e-mail</button>
+        </div>
+        <div id="painelNota" role="tabpanel" aria-labelledby="abaNota">
+          <form id="formBusca" class="linha-busca" autocomplete="off">
+            <input id="numNota" type="text" inputmode="numeric" placeholder="Número da nota (ex.: 3124304)" aria-label="Número da nota fiscal" required>
+            <button type="submit" class="btn primario" id="btnBuscar">Buscar</button>
+          </form>
+          <div class="acoes-secundarias">
+            <label class="link" style="display:inline-flex;align-items:center">
+              <input type="file" id="arqXml" accept=".xml,text/xml" hidden>
+              Anexar arquivo XML
+            </label>
+            <button type="button" class="link" id="btnSemXml">Registrar sem XML</button>
+          </div>
+        </div>
+        <div id="painelEmail" role="tabpanel" aria-labelledby="abaEmail" class="oculto">
+          <label for="textoEmail">Cole o e-mail completo (assunto e corpo)</label>
+          <textarea id="textoEmail" rows="9" spellcheck="false" placeholder="Assunto: Seguem dados Ref. ocorrência da NF: …&#10;&#10;NF DE ENTRADA: …&#10;PEDIDO: …&#10;BLOQUEIO: …"></textarea>
+          <div class="acoes-email">
+            <button type="button" class="btn primario" id="btnInterpretar">Interpretar e-mail</button>
+            <button type="button" class="btn leve" id="btnLimparEmail">Limpar</button>
+            <span class="item-meta" id="infoColagem"></span>
+          </div>
+        </div>
+        <div id="resultadoBusca"></div>
+      </section>
+
+      <!-- Conferência da importação por e-mail -->
+      <section class="cartao oculto" id="secImportacao" aria-labelledby="tImp">
+        <h2 id="tImp"><span class="passo" aria-hidden="true">✉</span> Conferência da importação</h2>
+        <div id="resumoImportacao"></div>
+      </section>
+
+      <!-- 2. Dados gerais -->
+      <section class="cartao oculto" id="secGeral" aria-labelledby="t2">
+        <h2 id="t2"><span class="passo">2</span> Dados gerais</h2>
+        <div id="resumoNota" class="resumo"></div>
+        <div id="avisoRegistradas"></div>
+        <div class="grade">
+          <label>Data da ocorrência *<input type="date" id="fData" required></label>
+          <div class="campo-conferente">
+            <label>Conferente *<select id="fConferente" required></select></label>
+            <div id="novoConferente" class="novo-conferente oculto">
+              <input type="text" id="nomeConferente" maxlength="60" placeholder="Nome do novo conferente" aria-label="Nome do novo conferente">
+              <div class="com-botao">
+                <button type="button" class="btn primario pequeno" id="btnSalvarConferente">Salvar</button>
+                <button type="button" class="btn leve pequeno" id="btnCancelarConferente">Cancelar</button>
+              </div>
+              <div id="erroConferente"></div>
+            </div>
+          </div>
+          <label>Fornecedor *<input type="text" id="fFornecedor" maxlength="120" required></label>
+          <label>Nota fiscal *<input type="text" id="fNf" inputmode="numeric" maxlength="9" required></label>
+          <label>N° Pedido *<input type="text" id="fPedido" list="listaPedidos" maxlength="60" required><datalist id="listaPedidos"></datalist></label>
+          <label>Bloqueio *<input type="text" id="fBloqueio" maxlength="60" placeholder="nº do bloqueio ou S/B" required></label>
+          <label>Valor (R$) *
+            <span class="com-botao">
+              <input type="text" id="fValor" inputmode="decimal" maxlength="20" placeholder="0,00" required>
+              <button type="button" class="btn leve" id="btnSugerirValor" title="Preço unitário da nota × quantidade dos itens marcados">Sugerir</button>
+            </span>
+          </label>
+        </div>
+      </section>
+
+      <!-- 3. Produtos -->
+      <section class="cartao oculto" id="secItens" aria-labelledby="t3">
+        <h2 id="t3"><span class="passo">3</span> Produtos da ocorrência</h2>
+        <div class="barra-itens">
+          <input type="search" id="filtroItens" placeholder="Filtrar itens da nota…" aria-label="Filtrar itens">
+          <div class="aplicar-todos">
+            <select id="tipoTodos" aria-label="Tipo para todos os marcados"></select>
+            <button type="button" class="btn leve" id="btnAplicarTipo">Aplicar aos marcados</button>
+          </div>
+        </div>
+        <div id="listaItens" class="itens"></div>
+        <div id="adicionarManual" class="oculto">
+          <div class="busca-sr">
+            <input type="search" id="buscaSrManual" placeholder="Adicionar produto: código SR, código de barras ou nome" aria-label="Adicionar produto do cadastro">
+            <div id="resultadosSrManual" class="resultados-sr"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 4. Fotos -->
+      <section class="cartao oculto" id="secFotos" aria-labelledby="t4">
+        <h2 id="t4"><span class="passo">4</span> Fotos <span class="opcional">(opcional)</span></h2>
+        <div id="zonaFotos" class="zona-fotos" tabindex="0" role="button" aria-label="Adicionar fotos: cole com Ctrl+V, arraste ou clique para escolher">
+          <div><strong>Cole com Ctrl+V</strong>, arraste as imagens para cá ou <span class="link">clique para escolher</span></div>
+          <div class="item-meta">Imagens ou PDF · vão para a pasta "Protocolo N" no Drive depois de registrar</div>
+          <input type="file" id="arqFotos" accept="image/*,application/pdf" multiple hidden>
+        </div>
+        <div id="listaFotos" class="lista-fotos"></div>
+      </section>
+    </div>
+
+    <!-- ═══════════════ BLOQUEIOS ═══════════════ -->
+    <div class="pagina oculto" id="viewBloqueios">
+      <button type="button" class="voltar" id="btnVoltarBloqueios">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M10 3L5 8l5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Ocorrências
+      </button>
+      <div class="pagina-topo">
+        <div>
+          <h1>Bloqueios</h1>
+          <p>Envie o relatório do Santri para ver a situação de cada bloqueio nas ocorrências.</p>
+        </div>
+      </div>
+
+      <section class="cartao" id="bloqEnvio" aria-label="Enviar relatório">
+        <div id="bloqZona" class="zona-fotos" tabindex="0" role="button" aria-label="Enviar relatório: arraste o arquivo ou clique para escolher">
+          <div><strong>Arraste o relatório para cá</strong> ou <span class="link">clique para escolher</span></div>
+          <div class="item-meta">Relação de bloqueios de estoque, Analítico, em .ods · nada é gravado na DATABASE</div>
+          <input type="file" id="bloqArquivo" accept=".ods,application/vnd.oasis.opendocument.spreadsheet" hidden>
+        </div>
+        <div class="bloq-progresso oculto" id="bloqProgresso" role="status" aria-live="polite"></div>
+        <div id="bloqErro"></div>
+      </section>
+
+      <div class="oculto" id="bloqResultado">
+        <div class="bloq-cabecalho">
+          <h2 class="bloq-titulo">Bloqueios</h2>
+          <div class="bloq-resumo" id="bloqResumo" aria-live="polite"></div>
+          <div class="pagina-acoes">
+            <button type="button" class="btn primario pequeno" id="btnRelatorioEstoque">Relatório para o estoque</button>
+            <button type="button" class="btn leve pequeno" id="btnAtualizarBloqueios">Atualizar ocorrências</button>
+            <button type="button" class="btn leve pequeno" id="btnTrocarRelatorio">Enviar outro relatório</button>
+          </div>
+        </div>
+        <div id="bloqAviso"></div>
+        <div class="bloq-barra">
+        <div class="segmentado bloq-abas" role="tablist" aria-label="Recorte dos bloqueios" id="bloqAbas"></div>
+        <div class="filtros bloq-filtros" role="search">
+          <div class="campo-busca">
+            <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="9" cy="9" r="5.5" stroke="currentColor" stroke-width="1.6"/><path d="M13.2 13.2L17 17" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+            <input type="search" id="bloqBusca" placeholder="Buscar bloqueio, protocolo, NF, produto…" aria-label="Buscar nos bloqueios">
+          </div>
+          <select id="bloqFornecedor" aria-label="Filtrar por fornecedor"></select>
+          <select id="bloqSelo" aria-label="Filtrar por selo"></select>
+          <select id="bloqOrdem" aria-label="Ordenar cartões">
+            <option value="dias">Mais antigos</option>
+            <option value="valor">Maior valor</option>
+            <option value="numero">Número do bloqueio</option>
+          </select>
+        </div>
+        </div>
+        <p class="bloq-nota"><span id="bloqNota"></span> <span id="bloqOrigem"></span></p>
+        <div class="bloq-ocultas" id="bloqOcultas"></div>
+        <p class="bloq-contagem" id="bloqContagem" aria-live="polite"></p>
+        <div class="quadro bloq-quadro" id="bloqQuadro"></div>
+        <div class="bloq-rel oculto" id="bloqRelatorio"></div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Barra de ação do formulário -->
+  <div class="rodape oculto" id="rodape">
+    <div class="rodape-interno">
+      <span id="contagem">Nenhum produto marcado</span>
+      <div>
+        <button type="button" class="btn leve" id="btnLimpar">Limpar</button>
+        <button type="button" class="btn primario" id="btnRevisar" disabled>Revisar e registrar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Créditos -->
+  <footer class="creditos">
+    <span><?= CONFIG.NOME_APP ?> · <span id="versaoApp">versão <?= CONFIG.VERSAO ?></span></span>
+    <a href="https://github.com/luc118i" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      Desenvolvido por Lucas Inacio
+    </a>
+  </footer>
+
+  <!-- Detalhe da ocorrência -->
+  <div class="veu oculto" id="veuPainel"></div>
+  <aside class="painel oculto" id="painel" role="dialog" aria-modal="true" aria-labelledby="painelTitulo">
+    <div class="painel-topo">
+      <div>
+        <h2 id="painelTitulo">Ocorrência</h2>
+        <p id="painelSub"></p>
+      </div>
+      <button type="button" class="btn-icone" id="btnFecharPainel" aria-label="Fechar detalhes">
+        <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="painel-corpo" id="painelCorpo"></div>
+  </aside>
+
+  <!-- Revisão / resultado -->
+  <div class="modal oculto" id="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitulo">
+    <div class="modal-caixa">
+      <h2 id="modalTitulo">Revisar</h2>
+      <div id="modalCorpo"></div>
+      <div class="modal-acoes" id="modalAcoes"></div>
+    </div>
+  </div>
+
+  <div class="carregando oculto" id="carregando" role="status" aria-live="polite">
+    <div class="carregando-cartao">
+      <img class="carregando-logo" src="<?!= incluir_('Logo'); ?>" alt="Soreparos" width="156" height="30">
+      <div class="giro"></div>
+      <span id="carregandoTexto">Carregando…</span>
+    </div>
+  </div>
+  <div class="toast oculto" id="toast" role="status" aria-live="polite"></div>
+
+  <?!= incluir_('Componentes'); ?>
+  <?!= incluir_('App'); ?>
+  <?!= incluir_('Home'); ?>
+  <?!= incluir_('Importar'); ?>
+  <?!= incluir_('ConfigEmail'); ?>
+  <?!= incluir_('TelaBloqueios'); ?>
+</body>
+</html>

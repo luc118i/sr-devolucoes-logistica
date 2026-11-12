@@ -1,0 +1,140 @@
+<script>
+/**
+ * ⚙ Configurações do e-mail de formalização: nome de quem formata (vai em "E-MAIL FORMATADO POR"),
+ * destinatários (Para / Cc) e a imagem da assinatura. Fica na aba CONFIG_APP (vale para todos).
+ */
+(function () {
+  'use strict';
+  var SR = window.SR, h = SR.h, limpar = SR.limpar;
+  function $(id) { return document.getElementById(id); }
+
+  var MAX = 1024 * 1024;
+  var LARGURA_MAX = 1200; // mostrada a 600 px no e-mail: fica nítida em telas de alta resolução
+  var ALTURA_MAX = 600;
+  var aberta = false, aoColar = null;
+
+  /**
+   * Qualquer imagem (WEBP, PNG, JPG, GIF…) → PNG redimensionado (ou JPEG se o PNG passar de 1 MB),
+   * formatos que o Gmail sempre mostra. @return Promise<{tipo, dataUrl, base64, largura, altura}>
+   */
+  function prepararAssinatura(file) {
+    return new Promise(function (ok, falha) {
+      if (!file || !/^image\//.test(file.type)) return falha(new Error('Escolha um arquivo de imagem.'));
+      if (file.size > 20 * 1024 * 1024) return falha(new Error('Imagem grande demais (máx. 20 MB antes da conversão).'));
+      var url = URL.createObjectURL(file);
+      var img = new Image();
+      img.onload = function () {
+        var esc = Math.min(1, LARGURA_MAX / img.naturalWidth, ALTURA_MAX / img.naturalHeight);
+        var c = document.createElement('canvas');
+        c.width = Math.max(1, Math.round(img.naturalWidth * esc)); c.height = Math.max(1, Math.round(img.naturalHeight * esc));
+        var ctx = c.getContext('2d');
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, 0, 0, c.width, c.height);
+        URL.revokeObjectURL(url);
+        var tipo = 'image/png', dataUrl = c.toDataURL(tipo);
+        if (dataUrl.length * 0.75 > MAX) {
+          // PNG pesado (foto): JPEG com fundo branco
+          var c2 = document.createElement('canvas'); c2.width = c.width; c2.height = c.height;
+          var x2 = c2.getContext('2d'); x2.fillStyle = '#fff'; x2.fillRect(0, 0, c2.width, c2.height); x2.drawImage(c, 0, 0);
+          tipo = 'image/jpeg'; dataUrl = c2.toDataURL(tipo, 0.9);
+        }
+        if (dataUrl.length * 0.75 > MAX) return falha(new Error('Mesmo reduzida, a imagem passou de 1 MB. Use uma imagem mais simples.'));
+        ok({ tipo: tipo, dataUrl: dataUrl, base64: dataUrl.split(',')[1], largura: c.width, altura: c.height });
+      };
+      img.onerror = function () { URL.revokeObjectURL(url); falha(new Error('Não foi possível ler essa imagem.')); };
+      img.src = url;
+    });
+  }
+
+  // Ctrl+V de imagem com as configurações abertas vai para a assinatura (e não para as fotos da ocorrência).
+  document.addEventListener('paste', function (ev) {
+    if (!aberta || !aoColar || $('modal').classList.contains('oculto')) return;
+    var itens = (ev.clipboardData && ev.clipboardData.items) || [];
+    for (var i = 0; i < itens.length; i++) {
+      if (itens[i].kind === 'file' && /^image\//.test(itens[i].type)) {
+        ev.preventDefault(); ev.stopPropagation();
+        aoColar(itens[i].getAsFile());
+        return;
+      }
+    }
+  }, true);
+
+  function campo(rotulo, el, ajuda) {
+    return h('label', { style: 'margin-bottom:12px' }, [rotulo, el, ajuda ? h('span', { class: 'item-meta', style: 'font-weight:400' }, ajuda) : null]);
+  }
+
+  function abrir() {
+    SR.chamar('obterConfigEmail', [], 'Abrindo configurações…').then(mostrar).catch(function (e) {
+      SR.toast('Não foi possível abrir as configurações: ' + SR.erroServidor(e));
+    });
+  }
+
+  function mostrar(c) {
+    var nova = null, remover = false;
+    var inNome = h('input', { type: 'text', maxlength: 80, value: c.nome, placeholder: 'Ex.: Ednaldo — Entrada de Notas' });
+    var inPara = h('input', { type: 'text', value: c.para, placeholder: 'compras@soreparos.com.br, fiscal@soreparos.com.br', inputmode: 'email' });
+    var inCc = h('input', { type: 'text', value: c.cc, placeholder: 'opcional', inputmode: 'email' });
+    var arquivo = h('input', { type: 'file', accept: 'image/*', hidden: true });
+    var previa = h('div', { class: 'zona-fotos', tabindex: '0', role: 'button', 'aria-label': 'Escolher imagem da assinatura', style: 'padding:16px' });
+    var erro = h('div');
+
+    var desenhar = function () {
+      limpar(previa);
+      var src = nova ? nova.dataUrl : (remover ? '' : c.assinatura);
+      if (src) {
+        previa.appendChild(h('img', { src: src, alt: 'Assinatura', style: 'max-width:100%;max-height:160px;margin:0 auto;display:block' }));
+        previa.appendChild(h('div', { class: 'item-meta' }, nova ? 'Nova imagem (' + nova.largura + '×' + nova.altura + ' px, ' + Math.round(nova.base64.length * 0.75 / 1024) + ' KB) — clique, arraste ou cole outra para trocar'
+          : 'Clique, arraste ou cole (Ctrl+V) outra imagem para trocar'));
+      } else {
+        previa.appendChild(h('div', {}, [h('strong', {}, 'Escolher imagem da assinatura'), ' — clique, arraste ou cole com Ctrl+V']));
+        previa.appendChild(h('div', { class: 'item-meta' }, 'Qualquer imagem (WEBP, PNG, JPG…): o app converte e ajusta o tamanho.'));
+      }
+    };
+    var usar = function (f) {
+      limpar(erro);
+      if (!f) return;
+      prepararAssinatura(f).then(function (r) { nova = r; remover = false; desenhar(); })
+        .catch(function (e) { erro.appendChild(SR.msg('erro', e.message)); });
+    };
+    aoColar = usar; aberta = true;
+    previa.addEventListener('click', function () { arquivo.click(); });
+    previa.addEventListener('keydown', function (ev) { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); arquivo.click(); } });
+    ['dragenter', 'dragover'].forEach(function (t) { previa.addEventListener(t, function (ev) { ev.preventDefault(); previa.classList.add('arrastando'); }); });
+    ['dragleave', 'drop'].forEach(function (t) { previa.addEventListener(t, function (ev) { ev.preventDefault(); previa.classList.remove('arrastando'); }); });
+    previa.addEventListener('drop', function (ev) { usar(ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files[0]); });
+    arquivo.addEventListener('change', function () { var f = arquivo.files && arquivo.files[0]; arquivo.value = ''; usar(f); });
+    desenhar();
+
+    var tirar = SR.botao('Remover assinatura', 'leve pequeno', function () { nova = null; remover = true; desenhar(); });
+
+    SR.abrirModal('Configurações do e-mail', [
+      h('p', { class: 'item-meta', style: 'margin:0 0 16px' }, 'Usado no "Formalizar e-mail". Os rascunhos são criados no Gmail de ' + c.conta + ' e valem para todos que usam o aplicativo.'),
+      campo('Nome em "E-mail formatado por"', inNome, 'Vazio = usa o e-mail de quem está logado.'),
+      campo('Para', inPara, 'Separe vários endereços por vírgula.'),
+      campo('Cc', inCc),
+      h('div', { style: 'display:grid;gap:8px' }, [h('span', { style: 'font-size:13px;font-weight:500;color:var(--texto-2)' }, 'Assinatura (imagem no fim do e-mail)'), previa, arquivo,
+        h('div', {}, tirar)]),
+      erro
+    ], [
+      SR.botao('Cancelar', 'leve', SR.fecharModal),
+      SR.botao('Salvar', 'primario', function () {
+        limpar(erro);
+        var dados = { nome: inNome.value, para: inPara.value, cc: inCc.value, removerAssinatura: remover,
+          assinatura: nova ? { tipo: nova.tipo, base64: nova.base64 } : null };
+        SR.chamar('salvarConfigEmail', [dados], 'Salvando…').then(function (r) {
+          SR.configEmail = { nome: r.nome, para: r.para ? r.para.split(/,\s*/) : [], cc: r.cc ? r.cc.split(/,\s*/) : [], temAssinatura: !!r.assinatura };
+          SR.fecharModal();
+          SR.toast('Configurações do e-mail salvas.');
+          document.dispatchEvent(new Event('sr-config-email'));
+        }).catch(function (e) {
+          erro.appendChild(SR.msg('erro', SR.erroServidor(e)));
+        });
+      })
+    ]);
+    setTimeout(function () { inNome.focus(); }, 50);
+  }
+
+  $('btnConfigEmail').addEventListener('click', abrir);
+  window.SRConfigEmail = { abrir: abrir };
+})();
+</script>

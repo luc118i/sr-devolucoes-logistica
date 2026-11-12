@@ -1,0 +1,988 @@
+<script>
+/**
+ * Home — "Ocorrências": filtro de período (abre na semana atual, segunda a domingo),
+ * busca, listagem agrupada por dia, estados de carregamento/vazio/erro e painel de detalhe.
+ * Usa só dados reais da aba DATABASE (servidor: listarOcorrencias / pastaDoProtocolo).
+ */
+(function () {
+  'use strict';
+  var SR = window.SR;
+  var h = SR.h, limpar = SR.limpar;
+  function $(id) { return document.getElementById(id); }
+
+  var MESES = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+  var DIAS = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
+  var PRESETS = {
+    semana: 'Esta semana', semanaAnterior: 'Semana anterior', ultimos7: 'Últimos 7 dias', mes: 'Este mês', personalizado: 'Período'
+  };
+
+  var st = {
+    hoje: '', periodo: null, itens: [], total: 0, limitado: false, busca: '', filtros: {}, filtroAberto: null, modo: 'lista',
+    carregou: false, desatualizado: false, seq: 0, abertoEm: null, focoAntes: null
+  };
+
+  // ── datas (strings "yyyy-mm-dd", sem fuso: o "hoje" vem do servidor, no fuso da planilha) ──
+  function paraData(iso) { var p = iso.split('-'); return new Date(Date.UTC(+p[0], +p[1] - 1, +p[2])); }
+  function paraIso(d) { return d.toISOString().slice(0, 10); }
+  function somar(iso, dias) { var d = paraData(iso); d.setUTCDate(d.getUTCDate() + dias); return paraIso(d); }
+  function diaSemana(iso) { return paraData(iso).getUTCDay(); }
+
+  /** Período de um atalho. Semana = segunda a domingo. */
+  function periodoDe(preset, hoje) {
+    if (preset === 'semana' || preset === 'semanaAnterior') {
+      var seg = somar(hoje, -((diaSemana(hoje) + 6) % 7));
+      if (preset === 'semanaAnterior') seg = somar(seg, -7);
+      return { preset: preset, inicio: seg, fim: somar(seg, 6) };
+    }
+    if (preset === 'ultimos7') return { preset: preset, inicio: somar(hoje, -6), fim: hoje };
+    var d = paraData(hoje);
+    var ini = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
+    var fim = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0));
+    return { preset: 'mes', inicio: paraIso(ini), fim: paraIso(fim) };
+  }
+
+  function curta(iso, comAno) {
+    var d = paraData(iso);
+    return d.getUTCDate() + ' ' + MESES[d.getUTCMonth()] + (comAno ? ' ' + d.getUTCFullYear() : '');
+  }
+  function faixaTexto(p) {
+    var a = paraData(p.inicio), b = paraData(p.fim);
+    if (p.inicio === p.fim) return curta(p.inicio, a.getUTCFullYear() !== paraData(st.hoje).getUTCFullYear());
+    var mesmoAno = a.getUTCFullYear() === b.getUTCFullYear();
+    var anoAtual = b.getUTCFullYear() === paraData(st.hoje).getUTCFullYear() && mesmoAno;
+    if (mesmoAno && a.getUTCMonth() === b.getUTCMonth()) return a.getUTCDate() + '–' + curta(p.fim, !anoAtual);
+    return curta(p.inicio, !mesmoAno) + ' – ' + curta(p.fim, !anoAtual);
+  }
+  function rotuloDia(iso) {
+    if (iso === st.hoje) return 'Hoje';
+    if (iso === somar(st.hoje, -1)) return 'Ontem';
+    var d = paraData(iso);
+    return DIAS[d.getUTCDay()] + ', ' + curta(iso, d.getUTCFullYear() !== paraData(st.hoje).getUTCFullYear());
+  }
+  function dataLonga(iso) { return DIAS[diaSemana(iso)] + ', ' + curta(iso, true); }
+
+  // ── ícones ──
+  function svg(caminho, vb) {
+    var ns = 'http://www.w3.org/2000/svg';
+    var s = document.createElementNS(ns, 'svg');
+    s.setAttribute('viewBox', vb || '0 0 24 24'); s.setAttribute('fill', 'none'); s.setAttribute('aria-hidden', 'true');
+    caminho.forEach(function (d) {
+      var p = document.createElementNS(ns, 'path');
+      p.setAttribute('d', d); p.setAttribute('stroke', 'currentColor'); p.setAttribute('stroke-width', '1.7');
+      p.setAttribute('stroke-linecap', 'round'); p.setAttribute('stroke-linejoin', 'round');
+      s.appendChild(p);
+    });
+    return s;
+  }
+  var ICONE = {
+    vazio: ['M4 7.5h16M4 7.5l1.5 11a2 2 0 002 1.5h9a2 2 0 002-1.5L20 7.5M4 7.5L6 4h12l2 3.5', 'M9.5 12h5'],
+    erro: ['M12 8v5', 'M12 16.5h.01', 'M10.3 3.9L2.6 17.5A2 2 0 004.3 20.5h15.4a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z'],
+    busca: ['M11 18a7 7 0 100-14 7 7 0 000 14z', 'M20 20l-3.5-3.5'],
+    seta: ['M6 3l5 5-5 5'],
+    pasta: ['M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z'],
+    funil: ['M2.5 3.5h11l-4.2 5v4l-2.6 1.2V8.5z']
+  };
+
+  // ── situação (coluna STATUS da planilha) → selo ──
+  /** Selo da situação (coluna STATUS); sem situação e não formalizada aparece "Não formalizada". */
+  function selo(situacao, formalizado) {
+    var n = SR.normalizar(situacao);
+    var texto = situacao || (formalizado === false ? 'Não formalizada' : 'Sem status');
+    var tipo = !n ? 'neutro' : /FINALIZAD/.test(n) ? 'ok' : /AGUARDANDO/.test(n) ? 'aviso' : /VERIFICAR/.test(n) ? 'erro' : 'info';
+    return h('span', { class: 'selo ' + tipo, title: texto }, texto);
+  }
+
+  // ── período: chip + popover ──
+  function atualizarChip() {
+    $('periodoRotulo').textContent = PRESETS[st.periodo.preset] || 'Período';
+    $('periodoFaixa').textContent = faixaTexto(st.periodo);
+    document.querySelectorAll('#atalhos .atalho').forEach(function (b) {
+      b.setAttribute('aria-pressed', String(b.getAttribute('data-preset') === st.periodo.preset));
+    });
+  }
+  var veuMobile = null;
+  function abrirPeriodo() {
+    $('dataInicio').value = st.periodo.inicio; $('dataFim').value = st.periodo.fim;
+    $('dataInicio').max = st.hoje;
+    limpar($('erroPeriodo'));
+    $('popPeriodo').classList.remove('oculto');
+    $('btnPeriodo').setAttribute('aria-expanded', 'true');
+    veuMobile = h('div', { class: 'veu so-mobile', onclick: fecharPeriodo });
+    document.body.appendChild(veuMobile);
+    var ativo = document.querySelector('#atalhos .atalho[aria-pressed="true"]') || document.querySelector('#atalhos .atalho');
+    if (ativo) ativo.focus();
+  }
+  function fecharPeriodo(devolverFoco) {
+    if ($('popPeriodo').classList.contains('oculto')) return;
+    $('popPeriodo').classList.add('oculto');
+    $('btnPeriodo').setAttribute('aria-expanded', 'false');
+    if (veuMobile) { veuMobile.remove(); veuMobile = null; }
+    if (devolverFoco !== false) $('btnPeriodo').focus();
+  }
+  // Só o atalho fica salvo (recalculado ao abrir); período com datas escolhidas volta para "Esta semana"
+  var ATALHOS_SALVOS = ['semana', 'semanaAnterior', 'ultimos7', 'mes'];
+  function aplicarPeriodo(p) {
+    st.periodo = p;
+    SR.lembrar('periodo', ATALHOS_SALVOS.indexOf(p.preset) >= 0 ? p.preset : '');
+    atualizarChip();
+    fecharPeriodo();
+    carregar(true);
+  }
+
+  $('btnPeriodo').addEventListener('click', function () {
+    if ($('popPeriodo').classList.contains('oculto')) abrirPeriodo(); else fecharPeriodo();
+  });
+  document.querySelectorAll('#atalhos .atalho').forEach(function (b) {
+    b.addEventListener('click', function () { aplicarPeriodo(periodoDe(b.getAttribute('data-preset'), st.hoje)); });
+  });
+  $('btnAplicarPeriodo').addEventListener('click', function () {
+    var a = $('dataInicio').value, b = $('dataFim').value;
+    var erro = !a || !b ? 'Escolha as duas datas.' : b < a ? 'A data final é anterior à inicial.'
+      : (paraData(b) - paraData(a)) / 86400000 > 366 ? 'Escolha um período de até 1 ano.' : '';
+    if (erro) { limpar($('erroPeriodo')).appendChild(SR.msg('erro', erro)); return; }
+    var igualAtalho = ['semana', 'semanaAnterior', 'ultimos7', 'mes'].filter(function (k) {
+      var p = periodoDe(k, st.hoje); return p.inicio === a && p.fim === b;
+    })[0];
+    aplicarPeriodo(igualAtalho ? periodoDe(igualAtalho, st.hoje) : { preset: 'personalizado', inicio: a, fim: b });
+  });
+  $('btnLimparPeriodo').addEventListener('click', function () {
+    $('buscaHome').value = ''; st.busca = ''; st.filtros = {}; salvarFiltros();
+    aplicarPeriodo(periodoDe('semana', st.hoje));
+  });
+  document.addEventListener('click', function (ev) {
+    if ($('popPeriodo').classList.contains('oculto')) return;
+    if (!ev.target.closest('.periodo-wrap')) fecharPeriodo(false);
+  });
+
+  // ── busca ──
+  var timerBusca;
+  $('buscaHome').addEventListener('input', function () {
+    clearTimeout(timerBusca);
+    var v = this.value;
+    timerBusca = setTimeout(function () { st.busca = v; render(); }, 140);
+  });
+
+  // ── carregamento ──
+  function rodar(fn, args) {
+    return new Promise(function (ok, falha) {
+      var r = google.script.run.withSuccessHandler(ok).withFailureHandler(falha);
+      r[fn].apply(r, args || []);
+    });
+  }
+
+  /** @param {boolean=} trocouPeriodo  troca de período: some com a lista antiga (era de outro período) e mostra o esqueleto. */
+  function carregar(trocouPeriodo) {
+    var minha = ++st.seq;
+    var lista = $('listaOcorrencias');
+    st.carregando = true;
+    lista.setAttribute('aria-busy', 'true');
+    lista.classList.add('em-carga');
+    $('btnPeriodo').classList.add('em-carga');
+    if (!st.carregou || trocouPeriodo) esqueleto(); else lista.classList.add('atualizando');
+    if (trocouPeriodo) { st.avisoCarga = true; SR.carregando(true, 'Carregando ocorrências de ' + faixaTexto(st.periodo) + '…'); }
+    limpar($('resumoLista')).appendChild(h('span', { class: 'carregando-texto' }, [
+      h('span', { class: 'giro-mini', 'aria-hidden': 'true' }),
+      'Carregando ocorrências de ' + faixaTexto(st.periodo) + '…'
+    ]));
+    rodar('listarOcorrencias', [st.periodo.inicio, st.periodo.fim]).then(function (r) {
+      if (minha !== st.seq) return;
+      st.carregando = false;
+      st.itens = r.itens; st.total = r.total; st.limitado = r.limitado;
+      st.carregou = true; st.desatualizado = false; st.erro = '';
+      render();
+    }).catch(function (e) {
+      if (minha !== st.seq) return;
+      st.carregando = false;
+      st.erro = SR.erroServidor(e);
+      renderErro(st.erro);
+    }).then(function () {
+      if (minha !== st.seq) return;
+      lista.setAttribute('aria-busy', 'false');
+      lista.classList.remove('atualizando', 'em-carga');
+      $('btnPeriodo').classList.remove('em-carga');
+      // Só fecha o aviso que esta carga abriu: outra tela pode estar usando o mesmo aviso.
+      if (st.avisoCarga) { st.avisoCarga = false; SR.carregando(false); }
+    });
+  }
+
+  function esqueleto() {
+    var lista = limpar($('listaOcorrencias'));
+    lista.classList.remove('modo-quadro');
+    for (var i = 0; i < 6; i++) {
+      lista.appendChild(h('div', { class: 'esqueleto', 'aria-hidden': 'true' }, [
+        h('div', { class: 'barra-esq', style: 'width:' + (40 + (i * 13) % 35) + '%' }),
+        h('div', { class: 'barra-esq', style: 'width:' + (60 + (i * 7) % 30) + '%;height:10px' }),
+        h('div', { class: 'barra-esq', style: 'width:30%;height:10px' })
+      ]));
+    }
+  }
+
+  // ── renderização ──
+  // A planilha exibe números com milhar ("3.135.761"): busca casa com ou sem os pontos.
+  function semMilhar(s) { return String(s || '').replace(/(\d)[.,](?=\d)/g, '$1'); }
+
+  // ── filtros por coluna (estilo planilha: marca os valores que quer ver) ──
+  var VAZIO = '(vazio)';
+  var COLUNAS = [
+    { id: 'protocolo', nome: 'Protocolo', valor: function (o) { return o.protocolo ? String(o.protocolo) : VAZIO; } },
+    { id: 'fornecedor', nome: 'Fornecedor · NF', titulo: 'Fornecedor', valor: function (o) { return o.fornecedor || VAZIO; } },
+    { id: 'produto', nome: 'Produto', valor: function (o) { return o.produto || VAZIO; } },
+    { id: 'conferente', nome: 'Conferente', valor: function (o) { return o.conferente || VAZIO; } },
+    { id: 'tipo', nome: 'Tipo', valor: function (o) { return o.tipo || VAZIO; } },
+    { id: 'situacao', nome: 'Situação', valor: function (o) { return o.situacao || (o.formalizado === false ? 'Não formalizada' : 'Sem status'); } }
+  ];
+  function coluna(id) { return COLUNAS.filter(function (c) { return c.id === id; })[0]; }
+  // Filtros ficam salvos no navegador (localStorage) e voltam ao reabrir o app
+  function salvarFiltros() { SR.lembrar('filtros', JSON.stringify(st.filtros)); }
+  function filtrosSalvos() {
+    var bruto = {}, ok = {};
+    try { bruto = JSON.parse(SR.lembrado('filtros') || '{}') || {}; } catch (e) { return ok; }
+    COLUNAS.forEach(function (c) {
+      var f = bruto[c.id];
+      if (!f || typeof f !== 'object') return;
+      var vals = Object.keys(f).filter(function (v) { return f[v] === true; });
+      if (vals.length) { ok[c.id] = {}; vals.forEach(function (v) { ok[c.id][v] = true; }); }
+    });
+    return ok;
+  }
+  st.filtros = filtrosSalvos();
+  function filtrosAtivos() { return COLUNAS.filter(function (c) { return st.filtros[c.id]; }); }
+  /** Passa nos filtros de coluna (menos `exceto`, para a lista de valores de uma coluna considerar só as outras). */
+  function passaFiltros(o, exceto) {
+    return COLUNAS.every(function (c) { var f = st.filtros[c.id]; return c.id === exceto || !f || f[c.valor(o)]; });
+  }
+
+  function termosBusca() { return SR.normalizar(semMilhar(st.busca)).split(' ').filter(Boolean); }
+  function casaBusca(o, termos) {
+    if (!termos.length) return true;
+    if (!o._busca) {
+      var bruto = [o.protocolo, o.nf, o.pedido, o.fornecedor, o.conferente, o.produto, o.marca,
+        o.codProduto, o.codIntegracao, o.tipo, o.situacao, o.bloqueio].join(' ');
+      o._busca = SR.normalizar(bruto) + ' ' + SR.normalizar(semMilhar(bruto));
+    }
+    var t = o._busca;
+    return termos.every(function (x) { return t.indexOf(x) >= 0; });
+  }
+  function filtrados() {
+    var termos = termosBusca();
+    return st.itens.filter(function (o) { return passaFiltros(o) && casaBusca(o, termos); });
+  }
+
+  function render() {
+    if (!st.carregou || st.carregando) return; // a busca digitada durante o carregamento aplica quando chegar
+    fecharFiltro(false);
+    salvarFiltros();
+    var lista = limpar($('listaOcorrencias'));
+    var itens = filtrados();
+    var resumo = limpar($('resumoLista'));
+    var n = itens.length;
+    var ativos = filtrosAtivos();
+    resumo.appendChild(h('span', {}, [
+      h('strong', { class: 'num' }, String(n)), n === 1 ? ' ocorrência' : ' ocorrências',
+      st.busca.trim() || ativos.length ? ' de ' + st.itens.length + ' no período' : ''
+    ]));
+    resumo.appendChild(h('button', { type: 'button', class: 'link', onclick: function () { carregar(); } }, 'Atualizar'));
+
+    lista.classList.toggle('modo-quadro', st.modo === 'quadro' && !!st.itens.length);
+    if (!st.itens.length) return lista.appendChild(estadoVazioPeriodo());
+    if (st.modo === 'quadro') {
+      lista.appendChild(cabecalho('quadro-filtros'));
+      if (!n) return lista.appendChild(estadoSemResultado(ativos));
+      lista.appendChild(h('div', { id: 'quadroMsg', 'aria-live': 'polite' }));
+      lista.appendChild(quadro(itens));
+      if (st.limitado) lista.appendChild(h('div', { class: 'msg aviso', style: 'margin:12px 0 0' },
+        'Mostrando as ' + st.itens.length + ' mais recentes de ' + st.total + '. Reduza o período para ver as demais.'));
+      return;
+    }
+    lista.appendChild(cabecalho());
+    if (!n) return lista.appendChild(estadoSemResultado(ativos));
+
+    var porDia = {};
+    var ordem = [];
+    itens.forEach(function (o) { if (!porDia[o.data]) { porDia[o.data] = []; ordem.push(o.data); } porDia[o.data].push(o); });
+    ordem.forEach(function (dia) {
+      lista.appendChild(h('div', { class: 'grupo-dia', role: 'heading', 'aria-level': '2' }, [
+        h('span', {}, rotuloDia(dia)), h('span', { class: 'num' }, porDia[dia].length + (porDia[dia].length === 1 ? ' registro' : ' registros'))
+      ]));
+      porDia[dia].forEach(function (o) { lista.appendChild(linha(o)); });
+    });
+    if (st.limitado) lista.appendChild(h('div', { class: 'msg aviso', style: 'margin:12px' },
+      'Mostrando as ' + st.itens.length + ' mais recentes de ' + st.total + '. Reduza o período para ver as demais.'));
+  }
+
+  /** Cabeçalho da lista; no quadro (classe "quadro-filtros") os mesmos botões viram a barra de filtros. */
+  function cabecalho(classe) {
+    var quadroFiltros = classe === 'quadro-filtros';
+    var cab = h('div', { class: classe || 'cab-tabela' }, COLUNAS.map(function (c) {
+      var ativo = !!st.filtros[c.id];
+      var b = h('button', {
+        type: 'button', class: 'cab-filtro' + (ativo ? ' ativo' : ''), 'aria-haspopup': 'dialog', 'aria-expanded': 'false',
+        'aria-label': 'Filtrar ' + (c.titulo || c.nome) + (ativo ? ' (filtro ativo)' : ''),
+        onclick: function (ev) { ev.stopPropagation(); if (st.filtroAberto === c.id) fecharFiltro(); else abrirFiltro(c, b); }
+      }, [h('span', {}, c.nome), (function () { var s = svg(ICONE.funil, '0 0 16 16'); s.setAttribute('class', 'funil'); return s; })()]);
+      return h('div', { class: 'cab-col', 'data-col': c.id }, b);
+    }).concat(quadroFiltros ? [] : h('span', {})));
+    return cab;
+  }
+
+  // ── quadro (kanban por Situação) ──
+  function alternarModo(modo) {
+    st.modo = modo === 'quadro' ? 'quadro' : 'lista';
+    SR.lembrar('modo', st.modo);
+    $('viewHome').classList.toggle('larga', st.modo === 'quadro'); // quadro usa a largura toda da tela
+    document.querySelectorAll('#modoVista .modo').forEach(function (b) {
+      b.setAttribute('aria-pressed', String(b.getAttribute('data-modo') === st.modo));
+    });
+    render();
+  }
+  document.querySelectorAll('#modoVista .modo').forEach(function (b) {
+    b.addEventListener('click', function () { if (b.getAttribute('data-modo') !== st.modo) alternarModo(b.getAttribute('data-modo')); });
+  });
+
+  /** Colunas: situações da lista oficial (na ordem dela), depois as que só existem nos dados; "Sem status" primeiro, se houver. */
+  function colunasQuadro(itens) {
+    var cols = [], porChave = {};
+    var col = function (nome, aceita) {
+      var k = SR.normalizar(nome);
+      if (!porChave[k]) { porChave[k] = { nome: nome, chave: k, aceita: aceita, itens: [] }; cols.push(porChave[k]); }
+      return porChave[k];
+    };
+    var semStatus = { nome: '', chave: '', aceita: false, itens: [] };
+    (st.statusOpcoes || []).forEach(function (s) { if (s) col(s, true); });
+    itens.forEach(function (o) { if (o.situacao) col(o.situacao, false).itens.push(o); else semStatus.itens.push(o); });
+    // Com filtro na Situação, some a coluna vazia que ficou de fora do filtro
+    var f = st.filtros.situacao;
+    var vis = cols.filter(function (c) {
+      return c.itens.length || !f || Object.keys(f).some(function (v) { return SR.normalizar(v) === c.chave; });
+    });
+    if (semStatus.itens.length) vis.unshift(semStatus);
+    return vis;
+  }
+
+  var arrastando = null;
+  function quadro(itens) {
+    var q = h('div', { class: 'quadro' });
+    colunasQuadro(itens).forEach(function (c) {
+      var cartoes = h('div', { class: 'quadro-cartoes' }, c.itens.length ? c.itens.map(cartao)
+        : h('div', { class: 'quadro-vazio' }, 'Nenhuma ocorrência'));
+      var secaoCol = h('section', { class: 'quadro-col', 'aria-label': (c.nome || 'Sem status') + ', ' + c.itens.length },
+        [h('header', { class: 'quadro-cab' }, [selo(c.nome, true), h('span', { class: 'num' }, String(c.itens.length))]), cartoes]);
+      var podeSoltar = function () { return arrastando && c.aceita && SR.normalizar(arrastando.situacao) !== c.chave; };
+      secaoCol.addEventListener('dragover', function (ev) {
+        if (!podeSoltar()) return;
+        ev.preventDefault(); ev.dataTransfer.dropEffect = 'move';
+        secaoCol.classList.add('alvo');
+      });
+      secaoCol.addEventListener('dragleave', function (ev) { if (!secaoCol.contains(ev.relatedTarget)) secaoCol.classList.remove('alvo'); });
+      secaoCol.addEventListener('drop', function (ev) {
+        secaoCol.classList.remove('alvo');
+        if (!podeSoltar()) return;
+        ev.preventDefault();
+        moverPara(arrastando, c.nome);
+      });
+      q.appendChild(secaoCol);
+    });
+    return q;
+  }
+
+  function cartao(o) {
+    var abrir = function () { abrirDetalhe(o, c); };
+    var c = h('div', {
+      class: 'cartao-oc', role: 'button', tabindex: '0', draggable: 'true',
+      'aria-label': 'Protocolo ' + (o.protocolo || '—') + ', ' + (o.fornecedor || 'sem fornecedor') + ', nota ' + o.nf + ', ' + (o.produto || ''),
+      onclick: abrir,
+      onkeydown: function (ev) { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); abrir(); } },
+      ondragstart: function (ev) {
+        arrastando = o; c.classList.add('arrastando');
+        ev.dataTransfer.effectAllowed = 'move';
+        try { ev.dataTransfer.setData('text/plain', String(o.linha)); } catch (e) { /* navegador antigo */ }
+      },
+      ondragend: function () {
+        arrastando = null; c.classList.remove('arrastando');
+        document.querySelectorAll('.quadro-col.alvo').forEach(function (x) { x.classList.remove('alvo'); });
+      }
+    }, [
+      h('span', { class: 'cartao-topo' }, [h('span', { class: 'protocolo num' }, '#' + (o.protocolo || '—')), h('span', {}, curta(o.data))]),
+      h('span', { class: 'cartao-titulo' }, o.fornecedor || 'Sem fornecedor'),
+      h('span', { class: 'cartao-nf num' }, 'NF ' + (o.nf || '—')),
+      h('span', { class: 'cartao-produto' }, o.produto || (o.codProduto ? 'Cód. ' + o.codProduto : '—')),
+      h('span', { class: 'cartao-meta' }, [h('span', {}, o.conferente || '—'), h('span', {}, o.tipo || '—')]),
+      o.formalizado === false ? h('span', { class: 'cartao-tag' }, 'Não formalizada') : null
+    ]);
+    return c;
+  }
+
+  /**
+   * Cartão solto em outra coluna. Mudar a situação também formaliza (regra do servidor), e algumas
+   * situações exigem NFD: nesses casos abre o painel já com a situação escolhida para a pessoa confirmar.
+   */
+  function moverPara(o, situacao) {
+    var faltaNfd = exigeNfd(situacao) && !nfdPreenchida(o.nfd);
+    if (faltaNfd || !o.formalizado) {
+      abrirDetalhe(o);
+      var sel = $('painelCorpo').querySelector('select[data-estilo="status"]');
+      if (sel) {
+        sel.value = situacao; sel.dispatchEvent(new Event('change'));
+        var nfd = sel.closest('section').querySelector('input[maxlength="120"]');
+        sel.scrollIntoView({ block: 'center' });
+        if (faltaNfd && nfd) nfd.focus(); else sel.focus();
+      }
+      SR.toast(faltaNfd ? 'Informe o Nº da NFD e clique em "Salvar situação".'
+        : 'Ainda não formalizada: salvar a situação também a marca como formalizada. Confira e clique em "Salvar situação".');
+      return;
+    }
+    salvarStatus('status', [o], situacao, o.nfd || '', $('quadroMsg'), null);
+  }
+
+  var popFiltro = null;
+  function fecharFiltro(devolverFoco) {
+    if (!popFiltro) return;
+    var col = st.filtroAberto;
+    popFiltro.remove(); popFiltro = null; st.filtroAberto = null;
+    if (veuMobile) { veuMobile.remove(); veuMobile = null; }
+    var b = document.querySelector('.cab-col[data-col="' + col + '"] .cab-filtro');
+    if (b) { b.setAttribute('aria-expanded', 'false'); if (devolverFoco !== false) b.focus(); }
+  }
+  /** Janela do filtro: valores da coluna (considerando os outros filtros e a busca), com contagem, busca e marcar todos. */
+  function abrirFiltro(c, botao) {
+    fecharFiltro(false); fecharPeriodo(false);
+    var termos = termosBusca();
+    var base = st.itens.filter(function (o) { return passaFiltros(o, c.id) && casaBusca(o, termos); });
+    var cont = {};
+    base.forEach(function (o) { var v = c.valor(o); cont[v] = (cont[v] || 0) + 1; });
+    // valores marcados que sumiram com os outros filtros continuam na lista (para poder desmarcar)
+    Object.keys(st.filtros[c.id] || {}).forEach(function (v) { if (!(v in cont)) cont[v] = 0; });
+    var valores = Object.keys(cont).sort(function (a, b) {
+      if (a === VAZIO) return 1; if (b === VAZIO) return -1;
+      return a.localeCompare(b, 'pt-BR', { numeric: true, sensitivity: 'base' });
+    });
+    var marcados = {};
+    valores.forEach(function (v) { marcados[v] = !st.filtros[c.id] || !!st.filtros[c.id][v]; });
+
+    var busca = h('input', { type: 'search', placeholder: 'Procurar ' + (c.titulo || c.nome).toLowerCase() + '…', 'aria-label': 'Procurar valores' });
+    var todos = h('input', { type: 'checkbox' });
+    var caixa = h('div', { class: 'filtro-valores', role: 'group', 'aria-label': 'Valores de ' + (c.titulo || c.nome) });
+    var aplicar = h('button', { type: 'button', class: 'btn primario pequeno' }, 'Aplicar');
+    function visiveis() {
+      var q = SR.normalizar(busca.value);
+      return valores.filter(function (v) { return !q || SR.normalizar(v).indexOf(q) >= 0; });
+    }
+    function desenhar() {
+      limpar(caixa);
+      var vis = visiveis();
+      if (!vis.length) caixa.appendChild(h('div', { class: 'filtro-nada' }, 'Nenhum valor encontrado.'));
+      vis.forEach(function (v) {
+        caixa.appendChild(h('label', { class: 'filtro-valor' + (v === VAZIO ? ' vazio' : '') }, [
+          h('input', { type: 'checkbox', checked: marcados[v], onchange: function () { marcados[v] = this.checked; atualizarTodos(); } }),
+          h('span', { class: 'texto', title: v }, v), h('span', { class: 'num' }, String(cont[v]))
+        ]));
+      });
+      atualizarTodos();
+    }
+    function atualizarTodos() {
+      var vis = visiveis(), n = vis.filter(function (v) { return marcados[v]; }).length;
+      todos.checked = vis.length > 0 && n === vis.length;
+      todos.indeterminate = n > 0 && n < vis.length;
+      aplicar.disabled = !valores.some(function (v) { return marcados[v]; });
+    }
+    todos.addEventListener('change', function () { var m = todos.checked; visiveis().forEach(function (v) { marcados[v] = m; }); desenhar(); });
+    busca.addEventListener('input', desenhar);
+    busca.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') { ev.preventDefault(); if (!aplicar.disabled) aplicar.click(); } });
+    aplicar.addEventListener('click', function () {
+      // Com busca na janela, aplica só o que está visível e marcado (como na planilha)
+      var q = busca.value.trim(), escolha = {}, vis = visiveis();
+      (q ? vis : valores).forEach(function (v) { if (marcados[v]) escolha[v] = true; });
+      var tudo = !q && valores.every(function (v) { return marcados[v]; });
+      if (tudo) delete st.filtros[c.id]; else st.filtros[c.id] = escolha;
+      fecharFiltro(false); render(); focarCabecalho(c.id);
+    });
+
+    popFiltro = h('div', { class: 'popover pop-filtro', role: 'dialog', 'aria-label': 'Filtrar ' + (c.titulo || c.nome),
+      onclick: function (ev) { ev.stopPropagation(); },
+      onkeydown: function (ev) { if (ev.key === 'Escape') { ev.stopPropagation(); fecharFiltro(); } } }, [
+      h('h3', {}, 'Filtrar ' + (c.titulo || c.nome)),
+      busca,
+      h('label', { class: 'filtro-valor todos' }, [todos, h('span', { class: 'texto' }, 'Selecionar tudo'), h('span', { class: 'num' }, String(base.length))]),
+      caixa,
+      h('div', { class: 'popover-acoes' }, [
+        h('button', { type: 'button', class: 'btn leve pequeno', disabled: !st.filtros[c.id],
+          onclick: function () { delete st.filtros[c.id]; fecharFiltro(false); render(); focarCabecalho(c.id); } }, 'Limpar'),
+        aplicar
+      ])
+    ]);
+    desenhar();
+    var col = botao.parentNode;
+    col.appendChild(popFiltro);
+    // Colunas da direita abrem alinhadas à direita para não sair da tela
+    if (col.getBoundingClientRect().left + 320 > window.innerWidth - 16) popFiltro.classList.add('direita');
+    veuMobile = h('div', { class: 'veu so-mobile', onclick: function () { fecharFiltro(); } });
+    document.body.appendChild(veuMobile);
+    st.filtroAberto = c.id;
+    botao.setAttribute('aria-expanded', 'true');
+    busca.focus();
+  }
+  function focarCabecalho(id) {
+    var b = document.querySelector('.cab-col[data-col="' + id + '"] .cab-filtro');
+    if (b) b.focus();
+  }
+  document.addEventListener('click', function () { if (popFiltro) fecharFiltro(false); });
+
+  function linha(o) {
+    var titulo = (o.fornecedor || 'Sem fornecedor');
+    var b = h('button', {
+      type: 'button', class: 'oc',
+      'aria-label': 'Protocolo ' + (o.protocolo || '—') + ', ' + dataLonga(o.data) + ', ' + titulo + ', nota ' + o.nf + ', ' + (o.produto || '') + ', situação ' + (o.situacao || 'sem status'),
+      onclick: function () { abrirDetalhe(o, b); }
+    }, [
+      h('span', { class: 'oc-titulo' }, [h('span', {}, titulo), h('span', { class: 'nf num' }, 'NF ' + (o.nf || '—'))]),
+      h('span', { class: 'oc-produto' }, o.produto || (o.codProduto ? 'Cód. ' + o.codProduto : '—')),
+      h('span', { class: 'oc-meta' }, [
+        h('span', { class: 'protocolo num' }, '#' + (o.protocolo || '—')),
+        h('span', { class: 'conferente' }, o.conferente || '—'),
+        h('span', { class: 'tipo' }, o.tipo || '—'),
+        h('span', { class: 'qtd num' }, 'Qnt. ' + (o.qtd || '—'))
+      ]),
+      h('span', { class: 'oc-situacao' }, selo(o.situacao, o.formalizado)),
+      (function () { var s = svg(ICONE.seta, '0 0 16 16'); s.setAttribute('class', 'oc-seta'); return s; })()
+    ]);
+    return b;
+  }
+
+  function estado(icone, titulo, texto, acoes, classeIcone) {
+    return h('div', { class: 'estado entrar' }, [
+      h('div', { class: 'estado-icone ' + (classeIcone || '') }, svg(icone)),
+      h('h2', {}, titulo), h('p', {}, texto),
+      acoes && acoes.length ? h('div', { class: 'estado-acoes' }, acoes) : null
+    ]);
+  }
+  function btn(texto, estilo, acao) { return h('button', { type: 'button', class: 'btn ' + estilo, onclick: acao }, texto); }
+
+  function estadoVazioPeriodo() {
+    var p = st.periodo;
+    var nome = p.preset === 'semana' ? 'nesta semana' : p.preset === 'semanaAnterior' ? 'na semana anterior'
+      : p.preset === 'mes' ? 'neste mês' : 'neste período';
+    var acoes = [];
+    if (p.preset === 'semana') acoes.push(btn('Ver semana anterior', 'leve', function () { aplicarPeriodo(periodoDe('semanaAnterior', st.hoje)); }));
+    if (p.preset !== 'mes') acoes.push(btn('Ver este mês', 'leve', function () { aplicarPeriodo(periodoDe('mes', st.hoje)); }));
+    if (p.preset !== 'semana') acoes.push(btn('Voltar para esta semana', 'leve', function () { aplicarPeriodo(periodoDe('semana', st.hoje)); }));
+    acoes.push(btn('Nova ocorrência', 'primario', function () { SR.irPara('nova'); }));
+    return estado(ICONE.vazio, 'Nenhuma ocorrência ' + nome,
+      'Não há registros com data de ocorrência entre ' + curta(p.inicio, true) + ' e ' + curta(p.fim, true) + '.', acoes);
+  }
+  function estadoSemResultado(ativos) {
+    var temBusca = !!st.busca.trim(), acoes = [];
+    if (temBusca) acoes.push(btn('Limpar busca', 'leve', function () { $('buscaHome').value = ''; st.busca = ''; render(); $('buscaHome').focus(); }));
+    if (ativos.length) acoes.push(btn('Limpar filtros', 'leve', function () { st.filtros = {}; render(); }));
+    return estado(ICONE.busca, temBusca ? 'Nada encontrado para “' + st.busca.trim() + '”' : 'Nenhuma ocorrência com esses filtros',
+      temBusca ? 'A busca procura em NF, pedido, fornecedor, produto, conferente, tipo e protocolo dentro do período selecionado.'
+        : 'Nenhum registro do período combina com os filtros das colunas.', acoes);
+  }
+  function renderErro(texto) {
+    limpar($('resumoLista'));
+    $('listaOcorrencias').classList.remove('modo-quadro');
+    limpar($('listaOcorrencias')).appendChild(estado(ICONE.erro, 'Não foi possível carregar as ocorrências', texto,
+      [btn('Tentar novamente', 'primario', function () { carregar(true); })], 'erro'));
+  }
+
+  // ── painel de detalhe ──
+  function campo(rotulo, valor, largo) {
+    return h('div', { class: largo ? 'largo' : '' }, [h('dt', {}, rotulo), h('dd', {}, valor === '' || valor == null ? '—' : String(valor))]);
+  }
+  function secao(titulo, campos) {
+    return h('section', { class: 'painel-secao' }, [h('h3', {}, titulo), h('dl', { class: 'dados' }, campos)]);
+  }
+
+  function abrirDetalhe(o, origem) {
+    st.formalizando = null;
+    st.focoAntes = origem || document.activeElement;
+    $('painelTitulo').textContent = o.protocolo ? 'Protocolo ' + o.protocolo : 'Ocorrência (linha ' + o.linha + ')';
+    $('painelSub').textContent = dataLonga(o.data) + ' · ' + (o.fornecedor || '—');
+    var fotos = h('div', { class: 'fotos-box' }, [svg(ICONE.pasta), h('span', {}, 'Procurando a pasta de fotos…')]);
+    var corpo = limpar($('painelCorpo'));
+    corpo.appendChild(secaoStatus(o));
+    corpo.appendChild(secao('Nota fiscal', [
+      campo('Nota fiscal', o.nf), campo('N° Pedidos', o.pedido),
+      campo('Bloqueio', o.bloqueio), campo('Valor', o.valor ? 'R$ ' + o.valor : '')
+    ]));
+    corpo.appendChild(secao('Produto', [
+      campo('Produto', o.produto, true), campo('Marca', o.marca), campo('Qnt.', o.qtd),
+      campo('Cod produto', o.codProduto), campo('Cod integração', o.codIntegracao)
+    ]));
+    corpo.appendChild(secao('Ocorrência', [
+      campo('Tipo de Ocorrência', o.tipo, true), campo('Conferente', o.conferente),
+      campo('Observação', o.obs, true)
+    ]));
+    corpo.appendChild(h('section', { class: 'painel-secao' }, [h('h3', {}, 'Fotos'), fotos]));
+    corpo.appendChild(h('div', { class: 'estado-acoes', style: 'justify-content:flex-start;margin:0' }, [
+      btn('Formalizar e-mail', 'primario', function () { mostrarFormalizacao(o); }),
+      btn('Registrar outra ocorrência desta nota', 'leve', function () { fecharDetalhe(false); SR.novaParaNota(o.nf); })
+    ]));
+
+    $('veuPainel').classList.remove('oculto');
+    $('painel').classList.remove('oculto');
+    document.body.style.overflow = 'hidden';
+    $('btnFecharPainel').focus();
+
+    var meu = st.abertoEm = {};
+    if (!o.protocolo) { trocarFotos(fotos, 'Sem número de protocolo nesta linha.'); return; }
+    rodar('pastaDoProtocolo', [o.protocolo]).then(function (p) {
+      if (st.abertoEm !== meu) return;
+      if (!p) return trocarFotos(fotos, 'Nenhuma pasta de fotos para este protocolo.');
+      limpar(fotos);
+      fotos.appendChild(svg(ICONE.pasta));
+      fotos.appendChild(h('span', {}, [
+        h('a', { href: p.url, target: '_blank', rel: 'noopener' }, p.nome),
+        h('span', { class: 'item-meta' }, ' · ' + p.arquivos + (p.arquivos === 1 ? ' arquivo' : ' arquivos'))
+      ]));
+    }).catch(function (e) {
+      if (st.abertoEm !== meu) return;
+      trocarFotos(fotos, 'Não foi possível consultar as fotos: ' + SR.erroServidor(e));
+    });
+  }
+  // ── formalizar e-mail: monta o e-mail no modelo da equipe a partir da(s) linha(s) registrada(s) ──
+  var CATEGORIAS_MODELO = ['Produto faltando dentro dos volumes', 'Produto avariado/danificado', 'Produto em desacordo/trocado', 'Faltando volumes', 'Material com defeito'];
+  function so(s) { return String(s == null ? '' : s).replace(/\D/g, ''); }
+  /** "3138788" → "3.138.788"; mantém zeros à esquerda e o que já vier formatado. */
+  function milhar(v) {
+    var s = String(v == null ? '' : v).trim();
+    if (!/^\d+$/.test(s)) return s;
+    return s.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+  }
+  function unicos(lista) {
+    var vistos = {};
+    return lista.map(function (x) { return String(x || '').trim(); }).filter(function (x) {
+      var k = SR.normalizar(x); if (!x || vistos[k]) return false; vistos[k] = true; return true;
+    });
+  }
+  function maiusc(s) { return String(s || '').toLocaleUpperCase('pt-BR'); }
+
+  /** Assunto e corpo no formato do e-mail de ocorrência (o interpretador da importação lê o mesmo formato). */
+  function montarEmail(linhas, usuario, hora) {
+    var b = linhas[0];
+    var assunto = 'Seguem dados Ref. ocorrência da NF: ' + milhar(so(b.nf) || b.nf) + ' - SR Recebimento';
+    var tipos = unicos(linhas.map(function (o) { return o.tipo; }));
+    var opcoes = CATEGORIAS_MODELO.slice();
+    tipos.forEach(function (t) { if (!opcoes.some(function (c) { return SR.normalizar(c) === SR.normalizar(t); })) opcoes.push(t); });
+    var marcado = function (c) { return tipos.some(function (t) { return SR.normalizar(t) === SR.normalizar(c); }); };
+    var L = [];
+    L.push(hora < 12 ? 'Bom dia!' : hora < 18 ? 'Boa tarde!' : 'Boa noite!', '');
+    L.push('NF DE ENTRADA: ' + milhar(so(b.nf) || b.nf));
+    L.push('PEDIDO: ' + unicos(linhas.map(function (o) { return /^\d+$/.test(so(o.pedido)) && so(o.pedido) === String(o.pedido).replace(/\./g, '') ? milhar(so(o.pedido)) : o.pedido; })).join(' / '));
+    L.push('BLOQUEIO: ' + unicos(linhas.map(function (o) { return /^[\d.]+$/.test(o.bloqueio) ? milhar(so(o.bloqueio)) : o.bloqueio; })).join(' / '));
+    L.push('', 'FORNECEDOR: ' + unicos(linhas.map(function (o) { return o.fornecedor; })).join(' / '));
+    L.push('', 'CONFERENTE: ' + unicos(linhas.map(function (o) { return o.conferente; })).join(' / '));
+    L.push('', 'E-MAIL FORMATADO POR: ' + (usuario || ''));
+    L.push('', 'TIPO DE OCORRÊNCIA', '');
+    opcoes.forEach(function (c) { L.push((marcado(c) ? '(X) ' : '( ) ') + maiusc(c)); });
+    L.push('', 'DESCRIÇÃO DO ITEM', '');
+    tipos.forEach(function (t) {
+      L.push(maiusc(t), '');
+      linhas.filter(function (o) { return SR.normalizar(o.tipo) === SR.normalizar(t); }).forEach(function (o) {
+        var q = String(o.qtd || '').trim();
+        if (/^\d$/.test(q)) q = '0' + q;
+        var cod = /^\d+$/.test(so(o.codProduto)) ? milhar(so(o.codProduto)) : o.codProduto;
+        L.push(q + ' UNIDADE(S) DO PRODUTO: ' + cod + ' / ' + (/^[\d.]+$/.test(String(o.codIntegracao || '')) ? so(o.codIntegracao) : (o.codIntegracao || '—')) + ' - ' + (o.produto || 'produto sem nome no cadastro') + '.');
+        if (o.obs) L.push(o.obs);
+      });
+      L.push('');
+    });
+    L.push('Att.');
+    return { assunto: assunto, corpo: L.join('\n') };
+  }
+
+  function copiar(texto, rotulo, campo) {
+    var fallback = function () {
+      var t = h('textarea', { style: 'position:fixed;left:-9999px;top:0', 'aria-hidden': 'true' });
+      t.value = texto; document.body.appendChild(t); t.select();
+      var ok = false; try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+      t.remove();
+      if (ok) return SR.toast(rotulo + ' copiado.');
+      if (campo) { campo.focus(); campo.select(); }
+      SR.toast('O navegador bloqueou a cópia: o texto já está selecionado, use Ctrl+C.');
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(texto).then(function () { SR.toast(rotulo + ' copiado.'); }, fallback);
+    } else fallback();
+  }
+
+  function mostrarFormalizacao(o) {
+    st.formalizando = o;
+    // Cada protocolo é individual: o e-mail leva só o produto deste protocolo (e as fotos da pasta dele).
+    var mesmos = [o];
+    var incluir = {};
+    mesmos.forEach(function (x) { incluir[x.linha] = true; });
+
+    var corpo = limpar($('painelCorpo'));
+    $('painelTitulo').textContent = 'Formalizar e-mail';
+    $('painelSub').textContent = 'NF ' + milhar(so(o.nf) || o.nf) + ' · ' + dataLonga(o.data);
+
+    var inAssunto = h('input', { type: 'text', 'aria-label': 'Assunto do e-mail' });
+    var taCorpo = h('textarea', { rows: '16', spellcheck: 'false', 'aria-label': 'Texto do e-mail' });
+    var resultadoGmail = h('div', { 'aria-live': 'polite' });
+    var gerar = function () {
+      var linhas = mesmos.filter(function (x) { return incluir[x.linha]; });
+      if (!linhas.length) { inAssunto.value = ''; taCorpo.value = ''; return; }
+      var hora = new Date().getHours();
+      var e = montarEmail(linhas, (SR.configEmail && SR.configEmail.nome) || st.usuario, hora);
+      inAssunto.value = e.assunto; taCorpo.value = e.corpo;
+    };
+
+    /** Cria o rascunho (texto + fotos dos protocolos) e abre no Gmail numa nova aba. */
+    var abrirGmail = function () {
+      var linhas = mesmos.filter(function (x) { return incluir[x.linha]; });
+      if (!linhas.length || !inAssunto.value.trim() || !taCorpo.value.trim()) {
+        limpar(resultadoGmail).appendChild(SR.msg('erro', 'Escolha ao menos um produto e mantenha assunto e texto preenchidos.'));
+        return;
+      }
+      // A aba é aberta já no clique (senão o navegador bloqueia) e recebe o endereço quando o rascunho fica pronto.
+      var janela = null;
+      try { janela = window.open('', '_blank'); } catch (e) { janela = null; }
+      if (janela) { try { janela.document.write('<p style="font:16px system-ui;padding:24px">Preparando o rascunho no Gmail…</p>'); } catch (e) { /* outra origem */ } }
+      limpar(resultadoGmail);
+      SR.chamar('criarRascunhoGmail', [{
+        assunto: inAssunto.value, texto: taCorpo.value,
+        protocolos: linhas.map(function (x) { return x.protocolo; }).filter(Boolean)
+      }], 'Criando o rascunho com as fotos…').then(function (r) {
+        if (janela && !janela.closed) janela.location.href = r.url;
+        var partes = ['Rascunho criado no Gmail de ' + r.conta + ' com ' + r.anexados + (r.anexados === 1 ? ' anexo.' : ' anexos.')];
+        if (!r.total) partes.push('Nenhuma foto encontrada nas pastas dos protocolos.');
+        resultadoGmail.appendChild(SR.msg(r.deFora.length ? 'aviso' : 'ok', partes.join(' '),
+          r.deFora.length ? ['Ficaram de fora (limite de tamanho do Gmail) — o link da pasta está no texto: ' + r.deFora.join(', ')] : null));
+        resultadoGmail.appendChild(h('div', { class: 'estado-acoes', style: 'justify-content:flex-start;margin:8px 0 0' }, [
+          h('a', { class: 'btn leve', href: r.url, target: '_blank', rel: 'noopener' }, janela ? 'Abrir o rascunho de novo' : 'Abrir o rascunho no Gmail'),
+        ]));
+        // Já formaliza o protocolo (R marcado, S = hoje, U inicial); se o e-mail não for enviado, dá para desfazer.
+        var pendentes = linhas.filter(function (x) { return !x.formalizado; });
+        if (!pendentes.length) return;
+        var antes = pendentes.map(function (x) { return x.situacao || ''; });
+        var caixaForm = h('div', { 'aria-live': 'polite' });
+        resultadoGmail.appendChild(caixaForm);
+        salvarStatus('formalizar', pendentes, null, null, caixaForm, function () {
+          caixaForm.appendChild(SR.msg('ok', '✔ Protocolo marcado como formalizado (Data de Formalização: hoje).'));
+          caixaForm.appendChild(btn('Desfazer formalização', 'leve', function () {
+            salvarStatus('desformalizar', pendentes, null, null, caixaForm, function () {
+              limpar(caixaForm).appendChild(SR.msg('aviso', 'Formalização desfeita: o protocolo voltou a "não formalizado".'));
+            }, { situacaoAnterior: antes[0], manterMsg: false });
+          }));
+        }, { manterMsg: true });
+      }).catch(function (e) {
+        if (janela && !janela.closed) janela.close();
+        resultadoGmail.appendChild(SR.msg('erro', 'Não foi possível criar o rascunho: ' + SR.erroServidor(e) + ' O texto continua aqui para copiar.'));
+      });
+    };
+
+    corpo.appendChild(h('button', { type: 'button', class: 'voltar', onclick: function () { abrirDetalhe(o, st.focoAntes); } }, '‹ Voltar aos detalhes'));
+    if (mesmos.length > 1) {
+      corpo.appendChild(h('section', { class: 'painel-secao' }, [
+        h('h3', {}, 'Produtos desta NF registrados em ' + curta(o.data, true)),
+        h('div', { style: 'display:grid;gap:6px' }, mesmos.map(function (x) {
+          var cb = h('input', { type: 'checkbox', checked: true, style: 'width:20px;height:20px;accent-color:var(--primaria)' });
+          cb.addEventListener('change', function () { incluir[x.linha] = cb.checked; gerar(); });
+          return h('label', { style: 'display:flex;gap:10px;align-items:flex-start;font-weight:500;color:var(--texto)' }, [cb,
+            h('span', {}, ['#' + (x.protocolo || x.linha) + ' · ' + (x.produto || x.codProduto) + ' · ',
+              h('span', { class: 'item-meta' }, x.tipo + ' · Qnt. ' + x.qtd)])]);
+        }))
+      ]));
+    }
+    var ce = SR.configEmail || {};
+    corpo.appendChild(h('section', { class: 'painel-secao' }, [h('h3', {}, 'Destinatários'),
+      h('div', { class: 'fotos-box', style: 'display:grid;gap:4px' }, [
+        h('span', {}, [h('b', {}, 'Para: '), (ce.para && ce.para.length) ? ce.para.join(', ') : 'não configurado (preencha no Gmail)']),
+        ce.cc && ce.cc.length ? h('span', {}, [h('b', {}, 'Cc: '), ce.cc.join(', ')]) : null,
+        h('span', { class: 'item-meta' }, 'Assinatura: ' + (ce.temAssinatura ? 'imagem configurada' : 'nenhuma')),
+        h('button', { type: 'button', class: 'link', style: 'justify-self:start', onclick: function () { if (window.SRConfigEmail) SRConfigEmail.abrir(); } }, 'Configurar e-mail')
+      ])]));
+    corpo.appendChild(h('section', { class: 'painel-secao' }, [h('h3', {}, 'Assunto'), inAssunto]));
+    corpo.appendChild(h('section', { class: 'painel-secao' }, [h('h3', {}, 'Texto'), taCorpo,
+      h('p', { class: 'item-meta', style: 'margin:6px 0 0' }, 'Dá para ajustar o texto. O rascunho vai com as fotos do protocolo e, ao criá-lo, o protocolo já fica marcado como formalizado (dá para desfazer). Nada é enviado: você revisa e envia pelo Gmail.')]));
+    corpo.appendChild(h('div', { class: 'estado-acoes', style: 'justify-content:flex-start;margin:0' }, [
+      btn('Abrir rascunho no Gmail', 'primario', abrirGmail),
+      btn('Copiar texto', 'leve', function () { copiar(taCorpo.value, 'Texto', taCorpo); }),
+      btn('Copiar assunto', 'leve', function () { copiar(inAssunto.value, 'Assunto', inAssunto); })
+    ]));
+    corpo.appendChild(resultadoGmail);
+    gerar();
+    corpo.scrollTop = 0;
+    $('btnFecharPainel').focus();
+  }
+  window.SRFormalizar = { montarEmail: montarEmail };
+  // Configuração do e-mail salva com o painel de formalização aberto: atualiza destinatários e nome.
+  document.addEventListener('sr-config-email', function () {
+    if (st.formalizando && !$('painel').classList.contains('oculto')) mostrarFormalizacao(st.formalizando);
+  }); // usado na prévia/testes da tela
+
+  // ── formalização e situação (colunas R, S, U, V) ──
+  /** Grava no servidor e atualiza a lista e o painel. */
+  function salvarStatus(acao, linhas, situacao, nfd, caixaMsg, depois, extra) {
+    if (!(extra && extra.manterMsg)) limpar(caixaMsg);
+    var esperado = {};
+    linhas.forEach(function (x) { esperado[x.linha] = { situacao: x.situacao, nfd: x.nfd, formalizado: !!x.formalizado }; });
+    var pedido = { acao: acao, linhas: linhas.map(function (x) { return x.linha; }), situacao: situacao, nfd: nfd, esperado: esperado };
+    if (extra && extra.situacaoAnterior != null) pedido.situacaoAnterior = extra.situacaoAnterior;
+    SR.chamar('atualizarStatus', [pedido],
+      { formalizar: 'Marcando como formalizada…', desformalizar: 'Desfazendo a formalização…' }[acao] || 'Salvando a situação…').then(function (r) {
+      if (r.status === 'MUDOU') {
+        caixaMsg.appendChild(SR.msg('aviso', r.mensagem));
+        caixaMsg.appendChild(btn('Atualizar a lista', 'leve', function () { fecharDetalhe(false); carregar(); }));
+        return;
+      }
+      if (r.status !== 'OK') { caixaMsg.appendChild(SR.msg('erro', 'Não foi salvo:', r.erros || [])); return; }
+      r.linhas.forEach(function (n) {
+        // "linhas" pode vir de fora da lista do período (tela Bloqueios): atualiza os dois.
+        st.itens.concat(linhas).forEach(function (x) {
+          if (x.linha !== n.linha) return;
+          x.formalizado = n.formalizado; x.formalizacao = n.formalizacao; x.situacao = n.situacao; x.nfd = n.nfd; x._busca = null;
+        });
+      });
+      render();
+      document.dispatchEvent(new Event('sr-ocorrencia-alterada'));
+      SR.toast({ formalizar: 'Protocolo marcado como formalizado.', desformalizar: 'Formalização desfeita.' }[acao] || 'Situação salva.');
+      if (depois) depois();
+    }).catch(function (e) {
+      caixaMsg.appendChild(SR.msg('erro', 'Não foi possível salvar: ' + SR.erroServidor(e)));
+    });
+  }
+
+  // Mesmas regras do servidor (Status.js exigeNfd / Regras.js preenchido): "-" ou "." não contam como NFD
+  function exigeNfd(situacao) { return st.statusComNfd.some(function (s) { return SR.normalizar(s) === SR.normalizar(situacao); }); }
+  function nfdPreenchida(v) { var s = String(v == null ? '' : v).trim(); return s !== '' && !/^[-–.\s]+$/.test(s); }
+
+  function secaoStatus(o) {
+    var mesmas = [o]; // cada protocolo é individual: formaliza/atualiza só esta linha
+    var marcadas = {};
+    mesmas.forEach(function (x) { marcadas[x.linha] = true; });
+    var selecionadas = function () { return mesmas.filter(function (x) { return marcadas[x.linha]; }); };
+    var caixaMsg = h('div', { 'aria-live': 'polite' });
+    var reabrir = function () { abrirDetalhe(st.itens.filter(function (x) { return x.linha === o.linha; })[0] || o, st.focoAntes); };
+
+    var filhos = [h('h3', {}, 'Formalização e status')];
+    filhos.push(h('div', { class: 'fotos-box', style: 'display:grid;gap:4px' }, [
+      h('span', {}, o.formalizado ? [h('b', {}, '✔ Formalizada'), o.formalizacao ? ' em ' + o.formalizacao : ''] : [h('b', {}, 'Ainda não formalizada'), ' — envie o e-mail e marque aqui.'])
+    ]));
+
+    if (mesmas.length > 1) {
+      filhos.push(h('div', { style: 'display:grid;gap:6px;margin-top:10px' }, [h('span', { class: 'item-meta' }, 'Aplicar a (mesma NF ' + milhar(so(o.nf) || o.nf) + '):')].concat(mesmas.map(function (x) {
+        var cb = h('input', { type: 'checkbox', checked: true, style: 'width:20px;height:20px;accent-color:var(--primaria)' });
+        cb.addEventListener('change', function () { marcadas[x.linha] = cb.checked; });
+        return h('label', { style: 'display:flex;gap:10px;align-items:flex-start;font-weight:500;color:var(--texto)' }, [cb,
+          h('span', {}, ['#' + (x.protocolo || x.linha) + ' · ' + (x.produto || x.codProduto) + ' ', h('span', { class: 'item-meta' }, '(' + (x.situacao || 'sem status') + ')')])]);
+      }))));
+    }
+
+    if (!o.formalizado) {
+      filhos.push(h('div', { class: 'estado-acoes', style: 'justify-content:flex-start;margin:10px 0 0' }, [
+        btn('Marcar como formalizada', 'primario', function () {
+          var l = selecionadas(); if (!l.length) return SR.toast('Marque ao menos uma linha.');
+          salvarStatus('formalizar', l, null, null, caixaMsg, reabrir);
+        })
+      ]));
+    }
+
+    var sel = h('select', { 'aria-label': 'Situação (coluna STATUS)', 'data-estilo': 'status' });
+    sel.appendChild(h('option', { value: '' }, 'Escolha a situação…'));
+    (st.statusOpcoes.length ? st.statusOpcoes : [o.situacao]).forEach(function (s) { if (s) sel.appendChild(h('option', { value: s }, s)); });
+    sel.value = o.situacao || '';
+    var inNfd = h('input', { type: 'text', maxlength: 120, value: o.nfd || '', placeholder: 'Nº da NF de devolução ou "TRATATIVA INTERNA"' });
+    var ajuda = h('span', { class: 'item-meta', style: 'font-weight:400' });
+    var atualizarAjuda = function () {
+      var exige = exigeNfd(sel.value);
+      ajuda.textContent = exige ? 'Obrigatório para "' + sel.value + '".' : 'Obrigatório para ' + st.statusComNfd.join(' e ') + '.';
+      inNfd.required = exige;
+      if (!exige) inNfd.classList.remove('invalido');
+    };
+    sel.addEventListener('change', atualizarAjuda); atualizarAjuda();
+    filhos.push(h('div', { style: 'display:grid;gap:12px;margin-top:12px' }, [
+      h('label', {}, ['Situação (STATUS)', sel]),
+      h('label', {}, ['Nº da NFD', inNfd, ajuda]),
+      h('div', { class: 'estado-acoes', style: 'justify-content:flex-start;margin:0' }, [
+        btn('Salvar situação', o.formalizado ? 'primario' : 'leve', function () {
+          var l = selecionadas(); if (!l.length) return SR.toast('Marque ao menos uma linha.');
+          if (!sel.value) { limpar(caixaMsg).appendChild(SR.msg('erro', 'Escolha a situação.')); return sel.focus(); }
+          if (exigeNfd(sel.value) && !nfdPreenchida(inNfd.value)) {
+            inNfd.classList.add('invalido');
+            limpar(caixaMsg).appendChild(SR.msg('erro', 'Informe o Nº da NFD para "' + sel.value + '" (ou um texto como "TRATATIVA INTERNA").'));
+            return inNfd.focus();
+          }
+          inNfd.classList.remove('invalido');
+          salvarStatus('status', l, sel.value, inNfd.value, caixaMsg, reabrir);
+        })
+      ])
+    ]));
+    filhos.push(caixaMsg);
+    return h('section', { class: 'painel-secao' }, filhos);
+  }
+
+  function trocarFotos(box, texto) {
+    limpar(box); box.appendChild(svg(ICONE.pasta)); box.appendChild(h('span', { class: 'item-meta' }, texto));
+  }
+  function fecharDetalhe(devolverFoco) {
+    if ($('painel').classList.contains('oculto')) return;
+    st.abertoEm = null;
+    $('painel').classList.add('oculto');
+    $('veuPainel').classList.add('oculto');
+    document.body.style.overflow = '';
+    if (devolverFoco !== false && st.focoAntes && document.body.contains(st.focoAntes)) st.focoAntes.focus();
+  }
+  $('btnFecharPainel').addEventListener('click', function () { fecharDetalhe(); });
+  $('veuPainel').addEventListener('click', function () { fecharDetalhe(); });
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key !== 'Escape') return;
+    if (!$('painel').classList.contains('oculto')) fecharDetalhe();
+    else if (popFiltro) fecharFiltro();
+    else fecharPeriodo();
+  });
+  // Mantém o foco do teclado dentro do painel enquanto ele está aberto.
+  $('painel').addEventListener('keydown', function (ev) {
+    if (ev.key !== 'Tab') return;
+    var f = $('painel').querySelectorAll('button, a[href], input, select');
+    if (!f.length) return;
+    var prim = f[0], ult = f[f.length - 1];
+    if (ev.shiftKey && document.activeElement === prim) { ev.preventDefault(); ult.focus(); }
+    else if (!ev.shiftKey && document.activeElement === ult) { ev.preventDefault(); prim.focus(); }
+  });
+
+  // ── API para o App ──
+  window.SRHome = {
+    iniciar: function (cfg) {
+      st.hoje = cfg.hoje;
+      st.usuario = cfg.usuario || '';
+      st.statusOpcoes = cfg.statusOpcoes || [];
+      st.statusComNfd = cfg.statusComNfd || ['Aguardando transportadora', 'Finalizada'];
+      if (SR.lembrado('modo') === 'quadro') alternarModo('quadro');
+      var salvo = SR.lembrado('periodo');
+      st.periodo = periodoDe(ATALHOS_SALVOS.indexOf(salvo) >= 0 ? salvo : 'semana', st.hoje); // último atalho usado (padrão: semana atual)
+      atualizarChip();
+      carregar();
+    },
+    falhaAoIniciar: function (texto) {
+      limpar($('listaOcorrencias')).appendChild(estado(ICONE.erro, 'Não foi possível abrir o aplicativo', texto,
+        [btn('Tentar novamente', 'primario', function () { window.location.reload(); })], 'erro'));
+    },
+    /** Depois de registrar: a lista recarrega quando a pessoa voltar para a Home. */
+    desatualizar: function () { st.desatualizado = true; },
+    aoVoltar: function () { if (st.desatualizado && st.periodo) carregar(); },
+    /** Painel lateral com outro conteúdo (tela Bloqueios). */
+    abrirPainel: function (titulo, sub, filhos, origem) {
+      st.formalizando = null;
+      st.abertoEm = {};
+      st.focoAntes = origem || document.activeElement;
+      $('painelTitulo').textContent = titulo;
+      $('painelSub').textContent = sub;
+      var corpo = limpar($('painelCorpo'));
+      filhos.forEach(function (f) { if (f) corpo.appendChild(f); });
+      corpo.scrollTop = 0;
+      $('veuPainel').classList.remove('oculto');
+      $('painel').classList.remove('oculto');
+      document.body.style.overflow = 'hidden';
+      $('btnFecharPainel').focus();
+    },
+    fecharPainel: function () { fecharDetalhe(false); },
+    copiar: copiar,
+    abrirOcorrencia: function (o, origem) { abrirDetalhe(o, origem); },
+    /** Abre direto o "Formalizar e-mail" do protocolo. */
+    formalizar: function (o, origem) { abrirDetalhe(o, origem); mostrarFormalizacao(o); },
+    _periodoDe: periodoDe // usado nos testes da tela
+  };
+  esqueleto();
+})();
+</script>

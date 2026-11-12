@@ -1,0 +1,889 @@
+<script>
+(function () {
+  'use strict';
+
+  // ── estado ────────────────────────────────────────────────────────────────
+  var estado = { cfg: null, nota: null, manual: false, itens: [], fotos: [], idEnvio: novoId(), enviando: false };
+
+  // ── utilitários ──────────────────────────────────────────────────────────
+  function $(id) { return document.getElementById(id); }
+  function h(tag, attrs, filhos) {
+    var el = document.createElement(tag);
+    Object.keys(attrs || {}).forEach(function (k) {
+      var v = attrs[k];
+      if (v == null || v === false) return;
+      if (k === 'class') el.className = v;
+      else if (k.slice(0, 2) === 'on') el.addEventListener(k.slice(2), v);
+      else if (k === 'value') el.value = v;
+      else if (k === 'checked') el.checked = !!v;
+      else el.setAttribute(k, v === true ? '' : v);
+    });
+    [].concat(filhos == null ? [] : filhos).forEach(function (f) {
+      if (f == null || f === false) return;
+      el.appendChild(typeof f === 'object' ? f : document.createTextNode(String(f)));
+    });
+    return el;
+  }
+  function limpar(el) { while (el.firstChild) el.removeChild(el.firstChild); return el; }
+  function novoId() {
+    var a = new Uint8Array(16); (window.crypto || window.msCrypto).getRandomValues(a);
+    return Array.prototype.map.call(a, function (b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+  }
+  function num(n, casas) {
+    if (n === null || n === undefined || n === '' || isNaN(Number(n))) return '';
+    return Number(n).toLocaleString('pt-BR', { minimumFractionDigits: casas || 0, maximumFractionDigits: casas == null ? 4 : casas });
+  }
+  function numeroBR(v) {
+    var s = String(v == null ? '' : v).trim();
+    if (!s) return null;
+    if (/,/.test(s)) s = s.replace(/\./g, '').replace(',', '.');
+    return /^-?\d+(\.\d+)?$/.test(s) ? Number(s) : null;
+  }
+  /** Preenchido = não vazio e não só "-" ou "." (mesma regra do servidor). */
+  function preenchido(v) { var s = String(v == null ? '' : v).trim(); return s !== '' && !/^[-–.\s]+$/.test(s); }
+  function normalizar(s) {
+    return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim();
+  }
+  function lembrar(chave, valor) { try { localStorage.setItem('ocorr_' + chave, valor); } catch (e) { /* sem armazenamento */ } }
+  function lembrado(chave) { try { return localStorage.getItem('ocorr_' + chave) || ''; } catch (e) { return ''; } }
+
+  function carregando(sim, texto) {
+    $('carregandoTexto').textContent = texto || 'Carregando…';
+    $('carregando').classList.toggle('oculto', !sim);
+  }
+  var timerToast;
+  function toast(texto) {
+    var t = $('toast'); t.textContent = texto; t.classList.remove('oculto');
+    clearTimeout(timerToast); timerToast = setTimeout(function () { t.classList.add('oculto'); }, 3500);
+  }
+  function msg(tipo, texto, lista) {
+    return h('div', { class: 'msg ' + tipo }, [texto, lista && lista.length ? h('ul', {}, lista.map(function (l) { return h('li', {}, l); })) : null]);
+  }
+
+  /** google.script.run como Promise, com indicador de carregamento. */
+  function chamar(fn, args, texto) {
+    carregando(true, texto);
+    return new Promise(function (ok, falha) {
+      var runner = google.script.run
+        .withSuccessHandler(function (r) { carregando(false); ok(r); })
+        .withFailureHandler(function (e) { carregando(false); falha(e); });
+      runner[fn].apply(runner, args || []);
+    });
+  }
+  function erroServidor(e) {
+    return (e && e.message ? e.message : String(e)).replace(/^Exception:\s*/, '').replace(/^Error:\s*/, '');
+  }
+
+  // ── início ───────────────────────────────────────────────────────────────
+  function iniciar() {
+    chamar('iniciar', [], 'Abrindo…').then(function (cfg) {
+      estado.cfg = cfg;
+      $('usuario').textContent = cfg.usuario || '';
+      $('avatar').textContent = (cfg.usuario || '?').charAt(0).toUpperCase();
+      $('perfil').title = (cfg.usuario || '') + ' · versão ' + (cfg.versao || '') + ' · grava com as permissões de ' + (cfg.executaComo || '?');
+      preencherConferentes(cfg.conferentes, '');
+      preencherSelect($('tipoTodos'), cfg.tipos, 'Tipo de ocorrência…');
+      var ult = lembrado('conferente');
+      if (cfg.conferentes.indexOf(ult) >= 0) $('fConferente').value = ult;
+      conferenteAnterior = $('fConferente').value;
+      $('fData').value = cfg.hoje;
+      $('fData').max = cfg.hoje;
+      if (!cfg.conferentes.length || !cfg.tipos.length) $('resultadoBusca').appendChild(msg('erro', 'As listas de ' +
+        [!cfg.conferentes.length && 'conferentes', !cfg.tipos.length && 'tipos de ocorrência'].filter(Boolean).join(' e ') +
+        ' estão vazias na aba CONFIG_APP. Rode a função "setup" no editor do Apps Script e recarregue esta página.'));
+      if (!cfg.pastaConfigurada)$('resultadoBusca').appendChild(msg('aviso', 'A pasta dos XMLs ainda não foi configurada (PASTA_XML_ID na aba CONFIG_APP). Use "Anexar arquivo XML" ou "Registrar sem XML".'));
+      window.SR.configEmail = cfg.email || null;
+      if (window.SRHome) SRHome.iniciar(cfg);
+    }).catch(function (e) {
+      limpar($('resultadoBusca')).appendChild(msg('erro', 'Não foi possível abrir: ' + erroServidor(e)));
+      if (window.SRHome) SRHome.falhaAoIniciar(erroServidor(e));
+    });
+  }
+
+  function preencherSelect(sel, opcoes, vazio) {
+    limpar(sel).appendChild(h('option', { value: '' }, vazio));
+    opcoes.forEach(function (o) { sel.appendChild(h('option', { value: o }, o)); });
+  }
+
+  // ── 1. busca da nota ─────────────────────────────────────────────────────
+  $('formBusca').addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    var n = $('numNota').value.replace(/\D/g, '');
+    if (!n) { $('numNota').classList.add('invalido'); return; }
+    $('numNota').classList.remove('invalido');
+    if (!confirmarDescarte()) return;
+    var res = limpar($('resultadoBusca'));
+    chamar('buscarNota', [n], 'Procurando a nota ' + n + '…').then(function (r) {
+      if (r.status === 'UMA') return carregarNota(r.nota);
+      if (r.status === 'VARIAS') {
+        res.appendChild(msg('aviso', 'Há mais de uma nota com o número ' + n + '. Escolha o fornecedor:'));
+        res.appendChild(h('div', { class: 'opcoes' }, r.opcoes.map(function (o) {
+          return h('button', { type: 'button', class: 'btn leve', onclick: function () {
+            chamar('abrirNota', [o.fileId], 'Abrindo a nota…').then(carregarNota).catch(mostrarErroBusca);
+          } }, o.fornecedor + ' — série ' + o.serie + ' (' + o.cnpj + ')');
+        })));
+        return;
+      }
+      res.appendChild(msg('aviso', 'Nota ' + n + ' não encontrada na pasta de XMLs.', [
+        'Confira o número, ou anexe o arquivo XML, ou registre sem XML (preenchimento manual).'
+      ]));
+      res.appendChild(h('div', { class: 'opcoes' }, [
+        h('button', { type: 'button', class: 'btn leve', onclick: function () { iniciarManual(n); } }, 'Registrar a nota ' + n + ' sem XML')
+      ]));
+    }).catch(mostrarErroBusca);
+  });
+
+  function mostrarErroBusca(e) { limpar($('resultadoBusca')).appendChild(msg('erro', erroServidor(e))); }
+
+  $('arqXml').addEventListener('change', function () {
+    var f = this.files && this.files[0];
+    this.value = '';
+    if (!f) return;
+    if (f.size > 3 * 1024 * 1024) return mostrarErroBusca('Arquivo grande demais para um XML de nota.');
+    if (!confirmarDescarte()) return;
+    var leitor = new FileReader();
+    leitor.onload = function () {
+      chamar('lerXmlEnviado', [String(leitor.result)], 'Lendo o XML…').then(function (nota) {
+        limpar($('resultadoBusca'));
+        carregarNota(nota);
+      }).catch(mostrarErroBusca);
+    };
+    leitor.onerror = function () { mostrarErroBusca('Não foi possível ler o arquivo.'); };
+    leitor.readAsText(f, 'UTF-8');
+  });
+
+  $('btnSemXml').addEventListener('click', function () {
+    if (!confirmarDescarte()) return;
+    iniciarManual($('numNota').value.replace(/\D/g, ''));
+  });
+
+  /** Há itens marcados que seriam perdidos? */
+  function confirmarDescarte() {
+    var marcados = estado.itens.filter(function (i) { return i.marcado; }).length;
+    var fotos = estado.fotos.filter(function (f) { return f.status !== 'ok'; }).length;
+    if (!marcados && !fotos) return true;
+    return window.confirm('Descartar ' + [marcados && marcados + ' produto(s) marcado(s)', fotos && fotos + ' arquivo(s)'].filter(Boolean).join(' e ') + ' desta ocorrência?');
+  }
+
+  // ── 2. nota carregada / modo manual ──────────────────────────────────────
+  function carregarNota(nota) {
+    estado.nota = nota;
+    estado.manual = false;
+    estado.idEnvio = novoId();
+    estado.itens = nota.itens.map(function (it) {
+      return Object.assign({}, it, { chave: 'n' + it.nItem, marcado: nota.itens.length === 1, tipo: '', qtd: it.quantidade, obs: '' });
+    });
+    limpar($('resultadoBusca'));
+    $('secImportacao').classList.add('oculto');
+    $('numNota').value = nota.numero;
+    $('fFornecedor').value = nota.fornecedor;
+    $('fNf').value = nota.numero;
+    $('fNf').readOnly = !!(nota.origem && nota.origem.fileId);
+    $('fPedido').value = nota.pedidos[0] || '';
+    preencherDatalist(nota.pedidos);
+    $('fBloqueio').value = '';
+    $('fValor').value = '';
+
+    var r = limpar($('resumoNota'));
+    [['Emitente', nota.emitente.nome], ['CNPJ', nota.emitente.cnpj], ['NF', nota.numero + ' / série ' + nota.serie],
+     ['Emissão', nota.emissao], ['Total da NF', 'R$ ' + num(nota.valorTotal, 2)], ['Itens', nota.itens.length],
+     ['Natureza', nota.natOp], ['Origem', nota.origem && nota.origem.fileId ? 'pasta de XMLs' : 'arquivo anexado']]
+      .forEach(function (p) { if (p[1] !== '' && p[1] != null) r.appendChild(h('span', {}, [h('b', {}, p[0] + ': '), String(p[1])])); });
+    if (nota.pedidos.length > 1) r.appendChild(h('span', {}, [h('b', {}, 'Pedidos citados: '), nota.pedidos.join(', ')]));
+
+    var av = limpar($('avisoRegistradas'));
+    if (nota.jaRegistradas.length) {
+      av.appendChild(msg('aviso', 'Esta nota já tem ' + nota.jaRegistradas.length + ' ocorrência(s) registrada(s):', nota.jaRegistradas.map(function (o) {
+        return 'Linha ' + o.linha + ' · ' + o.data + ' · ' + (o.produto || o.codProduto || o.codIntegracao) + ' · ' + o.tipo + ' · qtd ' + num(o.qtd);
+      })));
+    }
+    mostrarSecoes();
+    $('adicionarManual').classList.add('oculto');
+    renderItens();
+    aplicarBloqueio();
+    if (!$('fConferente').value) $('fConferente').focus();
+  }
+
+  function iniciarManual(numero) {
+    estado.nota = null;
+    estado.manual = true;
+    estado.idEnvio = novoId();
+    estado.itens = [];
+    limpar($('resultadoBusca'));
+    $('secImportacao').classList.add('oculto');
+    limpar($('resumoNota')).appendChild(h('span', {}, 'Registro sem XML: preencha os dados da nota e adicione os produtos pela busca do cadastro.'));
+    limpar($('avisoRegistradas'));
+    $('fFornecedor').value = '';
+    $('fNf').value = numero || '';
+    $('fNf').readOnly = false;
+    $('fPedido').value = '';
+    preencherDatalist([]);
+    $('fBloqueio').value = '';
+    $('fValor').value = '';
+    mostrarSecoes();
+    $('adicionarManual').classList.remove('oculto');
+    renderItens();
+    aplicarBloqueio();
+    $(numero ? 'fFornecedor' : 'fNf').focus();
+  }
+
+  // ── ocorrência montada a partir de um cartão da tela Bloqueios ───────────
+  /** O Santri não traz a NF: a pessoa informa, e bloqueio, valor e produtos vêm do cartão. O tipo fica para a pessoa. */
+  function aplicarBloqueio() {
+    var b = estado.bloqueio;
+    if (!b) return;
+    $('fBloqueio').value = b.numero;
+    $('fValor').value = num(b.valor, 2);
+    if (!$('fFornecedor').value) $('fFornecedor').value = b.fornecedor;
+    b.itens.forEach(function (bi) {
+      var alvo = estado.itens.filter(function (i) { return i.sr && i.sr.codigo === bi.cod; })[0];
+      if (!alvo) {
+        alvo = {
+          chave: 'b' + bi.cod, manual: true, nItem: null, codigo: '', ean: '', descricao: bi.nome, unidade: bi.un, quantidade: null, valorUnitario: 0,
+          sr: { codigo: bi.cod, nome: bi.nome, marca: bi.marca, via: 'manual' }, tipo: '', obs: '',
+          impNota: estado.nota ? 'Produto do bloqueio não encontrado nesta nota. Confira se a NF é a da entrada ' + b.entrada + '.' : ''
+        };
+        estado.itens.push(alvo);
+      }
+      alvo.marcado = true;
+      alvo.qtd = bi.qtd;
+    });
+    renderItens();
+  }
+
+  function renderOrigemBloqueio() {
+    var alvo = limpar($('origemBloqueio')), b = estado.bloqueio;
+    if (!b) return;
+    alvo.appendChild(h('div', { class: 'bloq-origem-form' }, [
+      h('div', {}, [h('strong', {}, 'Bloqueio ' + b.rotulo), ' · ' + b.resumo + ' · R$ ' + num(b.valor, 2)]),
+      h('div', {}, 'Informe a NF da entrada ' + b.entrada + '. Bloqueio, valor e produtos já vêm preenchidos; falta escolher o tipo de cada produto.'),
+      h('button', { type: 'button', class: 'link', onclick: function () { if (confirmarDescarte()) { limparBloqueio(); novaOcorrencia(); irPara('bloqueios'); } } }, 'Voltar aos bloqueios')
+    ]));
+  }
+  function limparBloqueio() { estado.bloqueio = null; renderOrigemBloqueio(); }
+
+  function montarDeBloqueio(b) {
+    if (!confirmarDescarte()) return;
+    novaOcorrencia();
+    estado.bloqueio = b;
+    renderOrigemBloqueio();
+    irPara('nova');
+  }
+
+  function preencherDatalist(lista) {
+    var dl = limpar($('listaPedidos'));
+    lista.forEach(function (p) { dl.appendChild(h('option', { value: p })); });
+  }
+
+  function mostrarSecoes() {
+    ['secGeral', 'secItens', 'secFotos', 'rodape'].forEach(function (id) { $(id).classList.remove('oculto'); });
+    document.body.classList.add('com-barra');
+  }
+
+  // ── conferente: escolher ou cadastrar novo ───────────────────────────────
+  var NOVO_CONFERENTE = '__novo__';
+  var conferenteAnterior = '';
+
+  function preencherConferentes(lista, selecionado) {
+    var sel = $('fConferente');
+    preencherSelect(sel, lista, 'Selecione…');
+    sel.appendChild(h('option', { value: NOVO_CONFERENTE }, '＋ Cadastrar novo conferente…'));
+    sel.value = lista.indexOf(selecionado) >= 0 ? selecionado : '';
+  }
+
+  function mostrarNovoConferente(sim) {
+    $('novoConferente').classList.toggle('oculto', !sim);
+    limpar($('erroConferente'));
+    if (sim) { $('nomeConferente').value = ''; $('nomeConferente').focus(); }
+  }
+
+  $('fConferente').addEventListener('change', function () {
+    if (this.value === NOVO_CONFERENTE) { this.value = conferenteAnterior; mostrarNovoConferente(true); return; }
+    conferenteAnterior = this.value;
+    lembrar('conferente', this.value);
+    this.classList.remove('invalido');
+  });
+
+  $('btnCancelarConferente').addEventListener('click', function () { mostrarNovoConferente(false); });
+
+  function salvarConferente() {
+    var nome = $('nomeConferente').value.replace(/\s+/g, ' ').trim();
+    if (nome.length < 3) {
+      limpar($('erroConferente')).appendChild(msg('erro', 'Digite o nome do conferente (mínimo 3 letras).'));
+      return $('nomeConferente').focus();
+    }
+    chamar('cadastrarConferente', [nome], 'Salvando conferente…').then(function (r) {
+      if (r.erro) { limpar($('erroConferente')).appendChild(msg('erro', r.erro)); return $('nomeConferente').focus(); }
+      estado.cfg.conferentes = r.conferentes;
+      preencherConferentes(r.conferentes, r.nome);
+      conferenteAnterior = r.nome;
+      lembrar('conferente', r.nome);
+      $('fConferente').classList.remove('invalido');
+      mostrarNovoConferente(false);
+      toast('Conferente "' + r.nome + '" cadastrado e selecionado.');
+    }).catch(function (e) {
+      limpar($('erroConferente')).appendChild(msg('erro', erroServidor(e)));
+    });
+  }
+  $('btnSalvarConferente').addEventListener('click', salvarConferente);
+  $('nomeConferente').addEventListener('keydown', function (ev) {
+    if (ev.key === 'Enter') { ev.preventDefault(); salvarConferente(); }
+    if (ev.key === 'Escape') { ev.stopPropagation(); mostrarNovoConferente(false); }
+  });
+
+  $('btnSugerirValor').addEventListener('click', function () {
+    var marcados = estado.itens.filter(function (i) { return i.marcado && i.valorUnitario; });
+    if (!marcados.length) return toast('Marque produtos vindos do XML para sugerir o valor.');
+    var total = marcados.reduce(function (s, i) { return s + i.valorUnitario * (numeroBR(i.qtd) || 0); }, 0);
+    $('fValor').value = num(Math.round(total * 100) / 100, 2);
+    toast('Sugestão pelo preço unitário da nota — confira com o valor do bloqueio.');
+  });
+
+  // ── 3. itens ─────────────────────────────────────────────────────────────
+  $('filtroItens').addEventListener('input', renderItens);
+
+  $('btnAplicarTipo').addEventListener('click', function () {
+    var tipo = $('tipoTodos').value;
+    if (!tipo) return toast('Escolha o tipo de ocorrência.');
+    var n = 0;
+    estado.itens.forEach(function (i) { if (i.marcado) { i.tipo = tipo; n++; } });
+    if (!n) return toast('Nenhum produto marcado.');
+    renderItens();
+  });
+
+  function renderItens() {
+    var lista = limpar($('listaItens'));
+    var filtro = normalizar($('filtroItens').value);
+    $('filtroItens').parentNode.classList.toggle('oculto', estado.itens.length < 2);
+    if (!estado.itens.length) {
+      lista.appendChild(h('p', { class: 'item-meta' }, estado.manual ? 'Nenhum produto adicionado ainda.' : 'A nota não tem itens.'));
+    }
+    estado.itens.forEach(function (it) {
+      var texto = normalizar([it.descricao, it.codigo, it.ean, it.sr && it.sr.nome, it.sr && it.sr.codigo].join(' '));
+      if (filtro && !it.marcado && filtro.split(' ').some(function (t) { return texto.indexOf(t) < 0; })) return;
+      lista.appendChild(renderItem(it));
+    });
+    atualizarRodape();
+  }
+
+  function renderItem(it) {
+    var caixa = h('div', { class: 'item' + (it.marcado ? ' marcado' : '') + (it.impNota ? ' imp-item-atencao' : '') });
+    var chk = h('input', { type: 'checkbox', checked: it.marcado, 'aria-label': 'Incluir ' + it.descricao });
+    var alternar = function () { it.marcado = !it.marcado; renderItens(); };
+    chk.addEventListener('click', function (ev) { ev.stopPropagation(); alternar(); });
+
+    var sr = !it.sr
+      ? h('div', { class: 'sr falta' }, '⚠ Produto sem código SR — use "Buscar no cadastro"')
+      : h('div', { class: 'sr ' + (preenchido(it.sr.marca) ? 'ok' : 'falta') }, (preenchido(it.sr.marca) ? '✔ SR ' : '⚠ SR ') + it.sr.codigo + ' · ' + it.sr.nome +
+          (preenchido(it.sr.marca) ? ' · ' + it.sr.marca : ' — sem marca no CADASTRO (preencha no cadastro ou escolha outro)') +
+          (it.sr.via === 'historico' ? ' (pelo histórico)' : it.sr.via === 'manual' ? ' (escolhido)' : ''));
+
+    var meta = [];
+    if (it.codigo) meta.push('Cód. integração ' + it.codigo);
+    if (it.ean) meta.push('EAN ' + it.ean);
+    if (it.valorUnitario) meta.push('R$ ' + num(it.valorUnitario, 2) + '/' + (it.unidade || 'un'));
+
+    caixa.appendChild(h('div', { class: 'item-topo', onclick: alternar }, [
+      chk,
+      h('div', {}, [h('div', { class: 'item-desc' }, it.descricao), h('div', { class: 'item-meta' }, meta.join(' · ')), sr,
+        it.impNota ? h('div', { class: 'sr falta' }, '✉ ' + it.impNota) : null]),
+      h('div', { class: 'item-qtd' }, it.quantidade != null ? ['Qtd na nota', h('br'), h('b', {}, num(it.quantidade) + ' ' + (it.unidade || ''))] : (it.manual ? 'manual' : ''))
+    ]));
+
+    if (it.marcado) {
+      var selTipo = h('select', { 'data-campo': 'tipo' });
+      preencherSelect(selTipo, estado.cfg.tipos, 'Selecione…');
+      selTipo.value = it.tipo;
+      selTipo.addEventListener('change', function () { it.tipo = this.value; this.classList.remove('invalido'); });
+      var inQtd = h('input', { type: 'text', inputmode: 'decimal', value: it.qtd == null ? '' : String(it.qtd).replace('.', ','), 'data-campo': 'qtd' });
+      inQtd.addEventListener('input', function () { it.qtd = this.value; this.classList.remove('invalido'); });
+      var inObs = h('input', { type: 'text', maxlength: 500, value: it.obs, placeholder: 'Ex.: produto trincado na parte inferior' });
+      inObs.addEventListener('input', function () { it.obs = this.value; });
+
+      var inCodInt = null;
+      if (it.manual || !it.codigo || it._codigoEditavel) {
+        it._codigoEditavel = true; // sem cod. integração no XML: digitado aqui
+        inCodInt = h('input', { type: 'text', maxlength: 60, value: it.codigo, 'data-campo': 'codIntegracao', placeholder: 'código no fornecedor' });
+        inCodInt.addEventListener('input', function () { it.codigo = this.value.trim(); this.classList.remove('invalido'); });
+      }
+
+      caixa.appendChild(h('div', { class: 'item-campos' }, [
+        inCodInt ? h('label', {}, ['Cod integração *', inCodInt]) : null,
+        h('label', {}, ['Tipo de ocorrência *', selTipo]),
+        h('label', { class: 'qtd' }, ['Qtd. *' + (it.quantidade != null ? ' (máx. ' + num(it.quantidade) + ')' : ''), inQtd]),
+        h('label', { class: 'obs' }, ['Observação', inObs]),
+        h('div', { class: 'acoes-item' }, [
+          h('button', { type: 'button', class: 'btn leve', onclick: function () { abrirBuscaSr(caixa, it); } }, it.sr ? 'Trocar produto SR' : 'Buscar no cadastro'),
+          it.manual ? h('button', { type: 'button', class: 'link', onclick: function () {
+            estado.itens = estado.itens.filter(function (x) { return x !== it; }); renderItens();
+          } }, 'Remover') : null
+        ])
+      ]));
+      it._el = caixa;
+    }
+    return caixa;
+  }
+
+  /** Busca no cadastro SR dentro do item (para itens sem código SR). */
+  function abrirBuscaSr(caixa, it) {
+    var existente = caixa.querySelector('.busca-sr');
+    if (existente) { existente.remove(); return; }
+    var resultados = h('div', { class: 'resultados-sr' });
+    var input = h('input', { type: 'search', placeholder: 'Código SR, código de barras ou nome', value: it.ean || '' });
+    caixa.appendChild(h('div', { class: 'busca-sr' }, [input, resultados]));
+    ligarBuscaSr(input, resultados, function (p) {
+      it.sr = { codigo: p.codigo, nome: p.nome, marca: p.marca, via: 'manual' };
+      renderItens();
+    });
+    input.focus();
+    if (input.value) input.dispatchEvent(new Event('input'));
+  }
+
+  function ligarBuscaSr(input, resultados, escolher) {
+    var timer, seq = 0;
+    input.addEventListener('input', function () {
+      clearTimeout(timer);
+      var q = input.value.trim();
+      if (q.length < 2) { limpar(resultados); return; }
+      timer = setTimeout(function () {
+        var minha = ++seq;
+        google.script.run.withSuccessHandler(function (lista) {
+          if (minha !== seq) return;
+          limpar(resultados);
+          if (!lista.length) { resultados.appendChild(h('div', { class: 'item-meta' }, 'Nada encontrado no cadastro.')); return; }
+          lista.forEach(function (p) {
+            resultados.appendChild(h('button', { type: 'button', onclick: function () { escolher(p); } },
+              p.codigo + ' · ' + p.nome + (p.marca ? ' · ' + p.marca : '') + (p.ean ? ' · EAN ' + p.ean : '')));
+          });
+        }).withFailureHandler(function (e) {
+          limpar(resultados).appendChild(h('div', { class: 'msg erro' }, erroServidor(e)));
+        }).buscarProdutoSR(q);
+      }, 350);
+    });
+  }
+
+  ligarBuscaSr($('buscaSrManual'), $('resultadosSrManual'), function (p) {
+    estado.itens.push({
+      chave: 'm' + Date.now(), manual: true, nItem: null, codigo: '', ean: p.ean, descricao: p.nome, unidade: '',
+      quantidade: null, valorUnitario: 0, sr: { codigo: p.codigo, nome: p.nome, marca: p.marca, via: 'manual' },
+      marcado: true, tipo: '', qtd: 1, obs: ''
+    });
+    $('buscaSrManual').value = '';
+    limpar($('resultadosSrManual'));
+    renderItens();
+  });
+
+  function atualizarRodape() {
+    var n = estado.itens.filter(function (i) { return i.marcado; }).length;
+    $('contagem').textContent = n ? n + ' produto(s) marcado(s)' : 'Nenhum produto marcado';
+    $('btnRevisar').disabled = !n;
+  }
+
+  // ── revisão e gravação ───────────────────────────────────────────────────
+  function montarPayload() {
+    return {
+      idEnvio: estado.idEnvio,
+      origem: estado.nota ? estado.nota.origem : null,
+      geral: {
+        data: $('fData').value, conferente: $('fConferente').value, fornecedor: $('fFornecedor').value.trim(),
+        nf: $('fNf').value.replace(/\D/g, ''), pedido: $('fPedido').value.trim(), bloqueio: $('fBloqueio').value.trim(), valor: $('fValor').value.trim()
+      },
+      itens: estado.itens.filter(function (i) { return i.marcado; }).map(function (i) {
+        return {
+          nItem: i.nItem, descricao: i.descricao, codIntegracao: i.codigo, codProduto: i.sr ? i.sr.codigo : '',
+          produtoSR: i.sr ? i.sr.nome : '', marcaSR: i.sr ? i.sr.marca : '',
+          tipo: i.tipo, qtd: i.qtd, qtdNota: i.quantidade, obs: i.obs.trim()
+        };
+      })
+    };
+  }
+
+  /** Validação na tela (o servidor valida de novo). Marca os campos com problema. */
+  function validar(p) {
+    var erros = [];
+    document.querySelectorAll('.invalido').forEach(function (el) { el.classList.remove('invalido'); });
+    var marcar = function (id, texto) { $(id).classList.add('invalido'); erros.push(texto); };
+    if (!p.geral.data) marcar('fData', 'Informe a data da ocorrência.');
+    else if (p.geral.data > estado.cfg.hoje) marcar('fData', 'A data não pode ser futura.');
+    if (!p.geral.conferente || p.geral.conferente === NOVO_CONFERENTE) marcar('fConferente', 'Selecione o conferente.');
+    if (!p.geral.fornecedor) marcar('fFornecedor', 'Informe o fornecedor.');
+    if (!p.geral.nf) marcar('fNf', 'Informe o número da nota.');
+    if (!preenchido(p.geral.pedido)) marcar('fPedido', 'Informe o N° do pedido.');
+    if (!preenchido(p.geral.bloqueio)) marcar('fBloqueio', 'Informe o bloqueio (número ou S/B).');
+    if (!preenchido(p.geral.valor)) marcar('fValor', 'Informe o valor.');
+    else if (numeroBR(p.geral.valor) === null || numeroBR(p.geral.valor) < 0) marcar('fValor', 'Valor inválido.');
+    var vistos = {};
+    estado.itens.filter(function (i) { return i.marcado; }).forEach(function (i) {
+      var nome = i.descricao.slice(0, 50);
+      var q = numeroBR(i.qtd);
+      if (!i.tipo) { erros.push(nome + ': selecione o tipo.'); marcarItem(i, 'tipo'); }
+      if (!preenchido(i.codigo)) { erros.push(nome + ': informe o Cod integração.'); marcarItem(i, 'codIntegracao'); }
+      if (!i.sr) erros.push(nome + ': sem Cod produto (código SR) — use "Buscar no cadastro".');
+      else if (!preenchido(i.sr.nome) || !preenchido(i.sr.marca)) erros.push(nome + ': o produto SR ' + i.sr.codigo + ' está sem ' + (preenchido(i.sr.nome) ? 'marca' : 'nome') + ' no CADASTRO DE PRODUTOS.');
+      if (q === null || q <= 0) { erros.push(nome + ': quantidade inválida.'); marcarItem(i, 'qtd'); }
+      else if (i.quantidade != null && q > i.quantidade) { erros.push(nome + ': quantidade maior que a da nota (' + num(i.quantidade) + ').'); marcarItem(i, 'qtd'); }
+      var k = (i.sr ? i.sr.codigo : i.codigo) + '|' + i.tipo;
+      if (i.tipo && vistos[k]) erros.push(nome + ': mesmo produto e tipo repetidos — junte as quantidades.');
+      vistos[k] = true;
+    });
+    return erros;
+  }
+  function marcarItem(i, campo) {
+    var el = i._el && i._el.querySelector('[data-campo="' + campo + '"]');
+    if (el) el.classList.add('invalido');
+  }
+
+  $('btnRevisar').addEventListener('click', function () {
+    var p = montarPayload();
+    var erros = validar(p);
+    if (erros.length) {
+      abrirModal('Corrija antes de registrar', [msg('erro', 'Faltam informações:', erros)], [botao('Voltar', 'leve', fecharModal)]);
+      return;
+    }
+    var linhas = p.itens.map(function (i) {
+      return [p.geral.data.split('-').reverse().join('/'), p.geral.fornecedor, p.geral.conferente, p.geral.nf, p.geral.pedido, p.geral.bloqueio,
+        p.geral.valor, i.codIntegracao, i.codProduto, i.produtoSR, i.marcaSR, i.tipo, num(numeroBR(i.qtd)), i.obs];
+    });
+    var tabela = h('div', { class: 'tabela-rolagem' }, h('table', {}, [
+      h('thead', {}, h('tr', {}, ['Data', 'Fornecedor', 'Conferente', 'NF', 'Pedido', 'Bloqueio', 'Valor', 'Cod integração', 'Cod produto', 'Produto', 'Marca', 'Tipo', 'Qnt.', 'Observação']
+        .map(function (c) { return h('th', {}, c); }))),
+      h('tbody', {}, linhas.map(function (l) { return h('tr', {}, l.map(function (c) { return h('td', {}, c); })); }))
+    ]));
+    var cartoes = h('div', { class: 'revisao-cartoes' }, p.itens.map(function (i) {
+      return h('div', { class: 'revisao-cartao' }, [
+        h('b', {}, i.produtoSR || i.descricao),
+        h('div', { class: 'item-meta' }, 'Cod. ' + i.codProduto + ' · ' + (i.marcaSR || '') + ' · integração ' + i.codIntegracao),
+        h('div', {}, i.tipo + ' · Qnt. ' + num(numeroBR(i.qtd)) + (i.obs ? ' · ' + i.obs : ''))
+      ]);
+    }));
+    var geral = h('div', { class: 'resumo' }, [
+      ['Data', p.geral.data.split('-').reverse().join('/')], ['Fornecedor', p.geral.fornecedor], ['Conferente', p.geral.conferente],
+      ['NF', p.geral.nf], ['Pedido', p.geral.pedido], ['Bloqueio', p.geral.bloqueio], ['Valor', 'R$ ' + p.geral.valor]
+    ].map(function (x) { return h('span', {}, [h('b', {}, x[0] + ': '), x[1]]); }));
+    var corpo = [h('p', {}, p.itens.length + ' linha(s) serão adicionadas à aba DATABASE:'), geral, tabela, cartoes];
+    if (estado.fotos.length) corpo.push(msg('ok', estado.fotos.length + ' arquivo(s) serão enviados para a pasta "Protocolo" desta ocorrência no Drive.'));
+    abrirModal('Revisar ocorrência', corpo, [
+      botao('Voltar e editar', 'leve', fecharModal),
+      botao('Confirmar e registrar', 'primario', function () { enviar(p); })
+    ]);
+  });
+
+  function enviar(p) {
+    if (estado.enviando) return;
+    estado.enviando = true;
+    document.querySelectorAll('#modalAcoes button').forEach(function (b) { b.disabled = true; });
+    chamar('registrar', [p], 'Registrando na planilha…').then(function (r) {
+      estado.enviando = false;
+      if (r.status === 'OK') return estado.fotos.length ? enviarFotos(r) : sucesso(r, null);
+      if (r.status === 'DUPLICADO') {
+        return abrirModal('Possível duplicidade', [
+          msg('aviso', 'Já existe ocorrência desta nota para o mesmo produto e tipo:', r.duplicados.map(function (d) {
+            return 'Linha ' + d.linha + ' · ' + d.data + ' · ' + d.item + ' · ' + d.tipo + ' · qtd ' + num(d.qtd);
+          })),
+          h('p', {}, 'Se for uma ocorrência diferente (outro volume, outro dia), registre mesmo assim. Se for a mesma, cancele.')
+        ], [
+          botao('Cancelar', 'leve', fecharModal),
+          botao('Registrar mesmo assim', 'primario', function () { p.confirmarDuplicados = true; enviar(p); })
+        ]);
+      }
+      abrirModal('Não registrado', [msg('erro', 'O servidor recusou o registro:', r.erros || [])], [botao('Voltar', 'leve', fecharModal)]);
+    }).catch(function (e) {
+      estado.enviando = false;
+      abrirModal('Erro ao registrar', [
+        msg('erro', erroServidor(e)),
+        h('p', {}, 'Nada foi perdido na tela. Tentar de novo é seguro: o mesmo envio nunca é gravado duas vezes.')
+      ], [botao('Fechar', 'leve', fecharModal), botao('Tentar de novo', 'primario', function () { enviar(p); })]);
+    });
+  }
+
+  function sucesso(r, fotos) {
+    var faixa = r.linhas.length > 1 ? 'linhas ' + r.linhas[0] + ' a ' + r.linhas[r.linhas.length - 1] : 'linha ' + r.linhas[0];
+    var corpo = [msg('ok', '✔ ' + r.linhas.length + ' registro(s) gravado(s) na aba DATABASE, ' + faixa + '.')];
+    var pastas = r.pastas || (r.pasta ? [r.pasta] : []);
+    if (pastas.length) {
+      var links = [];
+      pastas.forEach(function (p, i) {
+        if (i) links.push(' · ');
+        links.push(h('a', { href: p.url, target: '_blank', rel: 'noopener' }, p.nome));
+      });
+      corpo.push(h('p', {}, ['📁 '].concat(links, [fotos ? ' — ' + fotos.ok + ' de ' + fotos.total + ' foto(s) enviada(s)' + (pastas.length > 1 ? ' para cada protocolo.' : '.') : ''])));
+    }
+    if (r.avisos && r.avisos.length) corpo.push(msg('aviso', 'Atenção:', r.avisos));
+    if (window.SRHome) SRHome.desatualizar();
+    if (window.SRBloqueios) SRBloqueios.desatualizar();
+    var deBloqueio = !!estado.bloqueio;
+    limparBloqueio();
+    var rascunho = function () {
+      fecharModal();
+      if (deBloqueio) { novaOcorrencia(); irPara('bloqueios'); }
+      SRBloqueios.rascunhoDasLinhas(r.linhas);
+    };
+    abrirModal('Ocorrência registrada', corpo, deBloqueio ? [
+      botao('Voltar aos bloqueios', 'leve', function () { fecharModal(); novaOcorrencia(); irPara('bloqueios'); }),
+      botao('Gerar rascunho', 'primario', rascunho)
+    ] : [
+      botao('Ver ocorrências', 'leve', function () { fecharModal(); novaOcorrencia(); irPara('home'); }),
+      botao('Mesma nota, outra ocorrência', 'leve', function () { fecharModal(); reabrirMesmaNota(); }),
+      botao('Nova ocorrência', 'leve', function () { fecharModal(); novaOcorrencia(); }),
+      botao('Gerar rascunho', 'primario', rascunho)
+    ]);
+  }
+
+  // ── fotos ────────────────────────────────────────────────────────────────
+  var TIPOS_ACEITOS = /^(image\/(jpeg|png|webp|gif|heic|heif)|application\/pdf)$/;
+  var MAX_FOTOS = 30, MAX_BYTES = 15 * 1024 * 1024, LADO_MAX = 2000;
+
+  /** Promise de google.script.run sem a tela de carregando (o progresso aparece no modal). */
+  function rodar(fn, args) {
+    return new Promise(function (ok, falha) {
+      var runner = google.script.run.withSuccessHandler(ok).withFailureHandler(falha);
+      runner[fn].apply(runner, args);
+    });
+  }
+
+  function limparFotos() {
+    estado.fotos.forEach(function (f) { if (f.preview) URL.revokeObjectURL(f.preview); });
+    estado.fotos = [];
+    renderFotos();
+  }
+
+  /** Reduz fotos grandes (lado máx. 2000 px, JPEG) para subir rápido; PDF/HEIC/GIF vão como estão. */
+  function prepararArquivo(file) {
+    return new Promise(function (ok, falha) {
+      var tipo = (file.type || '').toLowerCase();
+      if (!TIPOS_ACEITOS.test(tipo)) return falha(new Error(file.name + ': tipo não aceito (só imagens ou PDF).'));
+      var reduzir = /^image\/(jpeg|png|webp)$/.test(tipo);
+      var nome = file.name && !/^image\.(png|jpe?g)$/i.test(file.name) ? file.name : 'colada';
+      if (!reduzir) {
+        if (file.size > MAX_BYTES) return falha(new Error(file.name + ': maior que 15 MB.'));
+        var leitor = new FileReader();
+        leitor.onload = function () {
+          ok({ nome: nome, tipo: tipo, base64: String(leitor.result).split(',')[1], tamanho: file.size,
+            preview: tipo === 'application/pdf' ? '' : URL.createObjectURL(file) });
+        };
+        leitor.onerror = function () { falha(new Error(file.name + ': não foi possível ler.')); };
+        return leitor.readAsDataURL(file);
+      }
+      var url = URL.createObjectURL(file);
+      var img = new Image();
+      img.onload = function () {
+        var esc = Math.min(1, LADO_MAX / Math.max(img.naturalWidth, img.naturalHeight));
+        var c = document.createElement('canvas');
+        c.width = Math.round(img.naturalWidth * esc); c.height = Math.round(img.naturalHeight * esc);
+        var ctx = c.getContext('2d');
+        ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height); // PNG transparente não fica preto
+        ctx.drawImage(img, 0, 0, c.width, c.height);
+        var b64 = c.toDataURL('image/jpeg', 0.85).split(',')[1];
+        if (b64.length * 0.75 > MAX_BYTES) { URL.revokeObjectURL(url); return falha(new Error(file.name + ': imagem grande demais.')); }
+        ok({ nome: nome, tipo: 'image/jpeg', base64: b64, tamanho: Math.round(b64.length * 0.75), preview: url });
+      };
+      img.onerror = function () { URL.revokeObjectURL(url); falha(new Error(file.name + ': imagem inválida.')); };
+      img.src = url;
+    });
+  }
+
+  function adicionarArquivos(lista) {
+    var arquivos = Array.prototype.slice.call(lista || []);
+    if (!arquivos.length) return;
+    var espaco = MAX_FOTOS - estado.fotos.length;
+    if (espaco <= 0) return toast('Limite de ' + MAX_FOTOS + ' arquivos por ocorrência.');
+    if (arquivos.length > espaco) toast('Só cabem mais ' + espaco + ' arquivo(s) nesta ocorrência.');
+    Promise.all(arquivos.slice(0, espaco).map(function (f) {
+      return prepararArquivo(f).then(function (x) { return x; }, function (e) { return { erro: e.message }; });
+    })).then(function (prontos) {
+      var erros = [];
+      prontos.forEach(function (p) {
+        if (p.erro) erros.push(p.erro);
+        else estado.fotos.push(Object.assign(p, { id: novoId(), status: 'pendente' }));
+      });
+      renderFotos();
+      toast(erros.length ? erros.join(' · ') : prontos.length + ' arquivo(s) adicionado(s).');
+    });
+  }
+
+  function renderFotos() {
+    var lista = limpar($('listaFotos'));
+    estado.fotos.forEach(function (f, i) {
+      var marca = f.status === 'ok' ? ' ✔' : f.status === 'erro' ? ' ✖' : '';
+      lista.appendChild(h('div', { class: 'foto ' + (f.status === 'ok' || f.status === 'erro' ? f.status : ''), title: f.erro || f.nome }, [
+        f.preview ? h('img', { src: f.preview, alt: f.nome }) : h('div', { class: 'pdf' }, 'PDF'),
+        h('div', { class: 'legenda' }, (i + 1) + '. ' + f.nome + ' · ' + Math.max(1, Math.round(f.tamanho / 1024)) + ' KB' + marca),
+        f.status === 'ok' ? null : h('button', { type: 'button', class: 'remover', 'aria-label': 'Remover ' + f.nome, onclick: function () {
+          if (f.preview) URL.revokeObjectURL(f.preview);
+          estado.fotos = estado.fotos.filter(function (x) { return x !== f; });
+          renderFotos();
+        } }, '×')
+      ]));
+    });
+  }
+
+  $('zonaFotos').addEventListener('click', function () { $('arqFotos').click(); });
+  $('zonaFotos').addEventListener('keydown', function (ev) { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); $('arqFotos').click(); } });
+  $('arqFotos').addEventListener('click', function (ev) { ev.stopPropagation(); });
+  $('arqFotos').addEventListener('change', function () { adicionarArquivos(this.files); this.value = ''; });
+  ['dragenter', 'dragover'].forEach(function (t) {
+    $('zonaFotos').addEventListener(t, function (ev) { ev.preventDefault(); this.classList.add('arrastando'); });
+  });
+  ['dragleave', 'drop'].forEach(function (t) {
+    $('zonaFotos').addEventListener(t, function (ev) { ev.preventDefault(); this.classList.remove('arrastando'); });
+  });
+  $('zonaFotos').addEventListener('drop', function (ev) { adicionarArquivos(ev.dataTransfer && ev.dataTransfer.files); });
+
+  // Ctrl+V em qualquer lugar da tela (com a ocorrência aberta): imagens viram anexos; texto cola normal.
+  document.addEventListener('paste', function (ev) {
+    if ($('secFotos').classList.contains('oculto')) return;
+    var itens = (ev.clipboardData && ev.clipboardData.items) || [];
+    var arquivos = [];
+    for (var i = 0; i < itens.length; i++) {
+      if (itens[i].kind === 'file') { var f = itens[i].getAsFile(); if (f) arquivos.push(f); }
+    }
+    if (!arquivos.length) return;
+    ev.preventDefault();
+    adicionarArquivos(arquivos);
+  });
+
+  function faixaLinhas(r) {
+    return r.linhas.length > 1 ? 'linhas ' + r.linhas[0] + ' a ' + r.linhas[r.linhas.length - 1] : 'linha ' + r.linhas[0];
+  }
+
+  /** Depois de gravar: garante a pasta do protocolo e sobe as fotos pendentes, uma a uma. */
+  function enviarFotos(r) {
+    var progresso = h('p', {}, 'Registro gravado. Preparando a pasta das fotos…');
+    abrirModal('Enviando fotos', [progresso], []);
+    estado.enviando = true;
+    // Uma pasta por protocolo: a foto sobe uma vez e o servidor copia para as pastas dos outros protocolos.
+    var pastasProntas = r.pastas && r.pastas.length ? Promise.resolve(r.pastas)
+      : rodar('criarPastaRegistro', [r.linhas]).then(function (p) { r.pastas = p; return p; });
+    pastasProntas.then(function (pastas) {
+      var pendentes = estado.fotos.filter(function (f) { return f.status !== 'ok'; });
+      var feitas = 0;
+      var destino = pastas.length > 1 ? pastas.length + ' pastas (uma por protocolo)' : pastas[0].nome;
+      var outras = pastas.slice(1).map(function (p) { return p.id; });
+      return pendentes.reduce(function (cadeia, f) {
+        return cadeia.then(function () {
+          progresso.textContent = 'Enviando ' + (++feitas) + ' de ' + pendentes.length + ' para ' + destino + '…';
+          var indice = estado.fotos.indexOf(f) + 1;
+          return rodar('enviarFoto', [pastas[0].id, { nome: f.nome, tipo: f.tipo, base64: f.base64, indice: indice }, outras])
+            .then(function () { f.status = 'ok'; f.erro = ''; f.base64 = ''; }, function (e) { f.status = 'erro'; f.erro = erroServidor(e); });
+        });
+      }, Promise.resolve());
+    }).then(function () {
+      estado.enviando = false;
+      renderFotos();
+      var total = estado.fotos.length;
+      var falhas = estado.fotos.filter(function (f) { return f.status !== 'ok'; });
+      if (!falhas.length) return sucesso(r, { ok: total, total: total });
+      abrirModal('Algumas fotos não subiram', [
+        msg('ok', '✔ O registro foi gravado (' + faixaLinhas(r) + ').'),
+        msg('erro', falhas.length + ' de ' + total + ' arquivo(s) não foram enviados:', falhas.map(function (f) { return f.nome + ': ' + f.erro; }))
+      ], [
+        botao('Seguir sem elas', 'leve', function () { sucesso(r, { ok: total - falhas.length, total: total }); }),
+        botao('Tentar enviar de novo', 'primario', function () { enviarFotos(r); })
+      ]);
+    }).catch(function (e) {
+      estado.enviando = false;
+      abrirModal('Fotos não enviadas', [
+        msg('ok', '✔ O registro foi gravado (' + faixaLinhas(r) + ').'),
+        msg('erro', 'Não foi possível criar a pasta das fotos: ' + erroServidor(e))
+      ], [
+        botao('Seguir sem fotos', 'leve', function () { sucesso(r, null); }),
+        botao('Tentar de novo', 'primario', function () { enviarFotos(r); })
+      ]);
+    });
+  }
+
+  function reabrirMesmaNota() {
+    estado.idEnvio = novoId();
+    estado.itens.forEach(function (i) { i.marcado = false; i.tipo = ''; i.obs = ''; i.qtd = i.quantidade != null ? i.quantidade : 1; });
+    if (estado.manual) estado.itens = [];
+    limparFotos();
+    renderItens();
+  }
+
+  function novaOcorrencia() {
+    estado.nota = null; estado.manual = false; estado.itens = []; estado.idEnvio = novoId();
+    ['secGeral', 'secItens', 'secFotos', 'rodape'].forEach(function (id) { $(id).classList.add('oculto'); });
+    document.body.classList.remove('com-barra');
+    $('secImportacao').classList.add('oculto');
+    limparFotos();
+    limpar($('resultadoBusca'));
+    $('numNota').value = '';
+    $('filtroItens').value = '';
+    if (viewAtual === 'nova') $('numNota').focus();
+  }
+
+  $('btnLimpar').addEventListener('click', function () { if (confirmarDescarte()) novaOcorrencia(); });
+
+  // ── modal ────────────────────────────────────────────────────────────────
+  function botao(texto, estilo, acao) { return h('button', { type: 'button', class: 'btn ' + estilo, onclick: acao }, texto); }
+  function abrirModal(titulo, corpo, acoes) {
+    $('modalTitulo').textContent = titulo;
+    var c = limpar($('modalCorpo')); corpo.forEach(function (el) { if (el) c.appendChild(el); });
+    var a = limpar($('modalAcoes')); acoes.forEach(function (b) { a.appendChild(b); });
+    $('modal').classList.remove('oculto');
+    var ult = a.lastChild; if (ult) ult.focus();
+  }
+  function fecharModal() { if (!estado.enviando) $('modal').classList.add('oculto'); }
+  document.addEventListener('keydown', function (ev) { if (ev.key === 'Escape') fecharModal(); });
+
+  window.addEventListener('beforeunload', function (ev) {
+    if ((estado.itens.some(function (i) { return i.marcado; }) || estado.fotos.some(function (f) { return f.status !== 'ok'; })) && $('modal').classList.contains('oculto')) { ev.preventDefault(); ev.returnValue = ''; }
+  });
+
+  // ── navegação ────────────────────────────────────────────────────────────
+  var viewAtual = 'home';
+  var temHistorico = !!(window.google && google.script && google.script.history);
+
+  function irPara(v, semHistorico) {
+    if (['home', 'nova', 'bloqueios'].indexOf(v) < 0) v = 'home';
+    if (v === viewAtual) return;
+    viewAtual = v;
+    $('viewHome').classList.toggle('oculto', v !== 'home');
+    $('viewNova').classList.toggle('oculto', v !== 'nova');
+    $('viewBloqueios').classList.toggle('oculto', v !== 'bloqueios');
+    var formAberto = !$('secGeral').classList.contains('oculto');
+    $('rodape').classList.toggle('oculto', !(v === 'nova' && formAberto));
+    document.body.classList.toggle('com-barra', v === 'nova' && formAberto);
+    window.scrollTo(0, 0);
+    if (v === 'nova' && !estado.nota && !estado.manual) setTimeout(function () { $('numNota').focus(); }, 60);
+    if (v === 'home' && window.SRHome) SRHome.aoVoltar();
+    if (v === 'bloqueios' && window.SRBloqueios) SRBloqueios.aoVoltar();
+    if (!semHistorico && temHistorico) google.script.history.push({ v: v }, {}, v === 'home' ? 'inicio' : v);
+  }
+  if (temHistorico) google.script.history.setChangeHandler(function (e) { irPara((e.state && e.state.v) || 'home', true); });
+
+  $('btnNovaOcorrencia').addEventListener('click', function () { irPara('nova'); });
+  $('btnVoltarHome').addEventListener('click', function () { irPara('home'); });
+  $('btnMarca').addEventListener('click', function () { irPara('home'); });
+
+  window.SR = {
+    h: h, limpar: limpar, msg: msg, toast: toast, chamar: chamar, erroServidor: erroServidor, num: num,
+    normalizar: normalizar, lembrar: lembrar, lembrado: lembrado, irPara: irPara, numeroBR: numeroBR, carregando: carregando,
+    montarDeBloqueio: montarDeBloqueio,
+    abrirModal: abrirModal, fecharModal: fecharModal, botao: botao, configEmail: null,
+    /** Para a importação por e-mail preencher o formulário existente. */
+    form: {
+      estado: estado,
+      carregarNota: carregarNota,
+      iniciarManual: iniciarManual,
+      renderItens: renderItens,
+      confirmarDescarte: confirmarDescarte,
+      limparBloqueio: limparBloqueio,
+      novoId: novoId,
+      definirConferente: function (nome) {
+        if (estado.cfg.conferentes.indexOf(nome) < 0) return false;
+        $('fConferente').value = nome; conferenteAnterior = nome; lembrar('conferente', nome);
+        return true;
+      }
+    },
+    /** Abre "Nova ocorrência" já buscando a nota informada. */
+    novaParaNota: function (nf) {
+      irPara('nova');
+      $('numNota').value = String(nf || '').replace(/\D/g, '');
+      $('formBusca').dispatchEvent(new Event('submit', { cancelable: true }));
+    }
+  };
+
+  iniciar();
+})();
+</script>
