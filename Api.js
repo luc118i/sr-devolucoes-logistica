@@ -56,7 +56,7 @@ function iniciar() {
       executaComo: executaComo_(),
       statusOpcoes: opcoesStatus_(),
       statusComNfd: SITUACOES_COM_NFD,
-      email: (function (e) { return { nome: e.nome, para: e.para, cc: e.cc, temAssinatura: !!e.assinaturaId }; })(configEmail_())
+      email: { perfis: resumoPerfisEmail_() }
     };
   });
 }

@@ -177,6 +177,31 @@ function testesEmail_(caso, ok, igual) {
     ok(/nao-e-email/.test(erro), erro);
   });
 
+  caso('E-mail: perfis (assunto com {NF}, validação, escolha)', function () {
+    igual(aplicarModeloAssunto('Seguem dados Ref. ocorrência da NF: {NF} - SR Recebimento', '3.046.462'), 'Seguem dados Ref. ocorrência da NF: 3.046.462 - SR Recebimento');
+    igual(aplicarModeloAssunto('Seguem dados Ref. ocorrência da NF: {nf} - SR Reversa', '3.135.396'), 'Seguem dados Ref. ocorrência da NF: 3.135.396 - SR Reversa');
+    igual(aplicarModeloAssunto('', '1'), 'Seguem dados Ref. ocorrência da NF: 1 - SR Recebimento');
+    var n = 0, novoId = function () { return 'novo' + (++n); };
+    var v = validarPerfisEmail([
+      { id: 'a', nome: ' Recebimento ', assunto: 'x {NF}', para: 'a@x.com; A@x.com', cc: '', formatador: 'Ed' },
+      { nome: 'Reversa', assunto: 'y {NF}', para: '', cc: 'b@y.com' }
+    ], novoId);
+    igual([v[0].id, v[0].nome, v[0].para, v[1].id, v[1].cc], ['a', 'Recebimento', ['a@x.com'], 'novo1', ['b@y.com']]);
+    var falha = function (lista) { try { validarPerfisEmail(lista, novoId); return ''; } catch (e) { return e.message; } };
+    ok(/ao menos um/.test(falha([])), 'lista vazia');
+    ok(/nome do perfil/.test(falha([{ nome: ' ', assunto: 'x' }])), 'sem nome');
+    ok(/informe o assunto/.test(falha([{ nome: 'A', assunto: '' }])), 'sem assunto');
+    ok(/dois perfis/.test(falha([{ nome: 'A', assunto: 'x' }, { nome: 'a', assunto: 'y' }])), 'nome repetido');
+    ok(/Perfil "A".*nao-email/.test(falha([{ nome: 'A', assunto: 'x', para: 'nao-email' }])), 'e-mail inválido aponta o perfil');
+    igual(perfilPorId_(v, 'novo1').nome, 'Reversa');
+    igual([v[0].de, validarPerfisEmail([{ nome: 'R', assunto: 'x', de: 'Reversa@SoReparos.com.br' }], novoId)[0].de], ['', 'Reversa@SoReparos.com.br']);
+    ok(/remetente/.test(falha([{ nome: 'A', assunto: 'x', de: 'invalido' }])), 'De inválido');
+    ok(/um só remetente/.test(falha([{ nome: 'A', assunto: 'x', de: 'a@x.com, b@x.com' }])), 'dois remetentes');
+    var m = montarMime({ assunto: 'T', texto: 't', de: 'reversa@soreparos.com.br', fronteira: 'f' }, function (s) { return s; });
+    ok(m.indexOf('From: reversa@soreparos.com.br' + String.fromCharCode(13, 10)) >= 0, 'cabeçalho From');
+    igual(perfilPorId_(v, 'sumiu').nome, 'Recebimento');
+  });
+
   caso('E-mail: data da ocorrência explícita e datas por extenso', function () {
     var r = ler(email().replace('Boa tarde!', 'Boa tarde!\nDATA DA OCORRÊNCIA: 14/10/2026'));
     igual([r.campos.data.valor, r.campos.data.status], ['2026-10-14', 'ok']);

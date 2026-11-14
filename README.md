@@ -103,7 +103,7 @@ Na tela **Ocorrências**, abra o registro e clique em **Formalizar e-mail**. O a
 - **Abrir rascunho no Gmail**: cria um rascunho com o texto e **as fotos das pastas "Protocolo N" anexadas** (até ~18 MB; o que passar fica de fora, com aviso, e o link da pasta vai no texto) e abre o rascunho numa nova aba. O rascunho fica no Gmail da conta que executa o Web App (entradadenotas@). Destinatários em branco: você revisa e envia.
 - **Copiar texto / Copiar assunto** continuam disponíveis.
 - O rascunho sai **formatado**: rótulos e opção marcada em negrito, linha do produto e a observação logo abaixo em **vermelho e negrito**, e a **imagem da assinatura** no fim. O link da pasta de fotos só entra no texto se algum arquivo não coube no e-mail.
-- **⚙ Configurações do e-mail** (engrenagem no topo): nome que aparece em "E-MAIL FORMATADO POR" (vazio = e-mail de quem está logado), **Para**, **Cc** e a **imagem da assinatura** (qualquer imagem — WEBP, PNG, JPG…; o app converte para PNG de até 1200 px e mostra a 600 px no e-mail; dá para clicar, arrastar ou colar com Ctrl+V). Fica na `CONFIG_APP` (parâmetros `EMAIL_NOME`, `EMAIL_PARA`, `EMAIL_CC`, `EMAIL_ASSINATURA_ID`) e vale para todos; a imagem é guardada na pasta de fotos como `assinatura_email.*`.
+- **⚙ Perfis do e-mail** (engrenagem no topo): cada perfil tem **nome** (ex.: Recebimento, Reversa), **assunto** com `{NF}` no lugar do número (ex.: `Seguem dados Ref. ocorrência da NF: {NF} - SR Reversa`), nome em "E-MAIL FORMATADO POR" (vazio = e-mail de quem está logado), **Para**, **Cc** e a **imagem da assinatura** (qualquer imagem — WEBP, PNG, JPG…; o app converte para PNG de até 1200 px e mostra a 600 px no e-mail; dá para clicar, arrastar ou colar com Ctrl+V). Até 10 perfis, valem para todos e ficam na `CONFIG_APP` (parâmetro `EMAIL_PERFIS`, JSON). Ao formalizar, a pessoa escolhe o perfil (o navegador lembra a última escolha) e o assunto, os destinatários e a assinatura mudam junto. Quem já tinha a configuração única ganha automaticamente o perfil "Recebimento".
 - Permissão usada: `gmail.compose` (só cria rascunhos; não lê a caixa). Depois de atualizar, rode `verificarPermissoes` no editor e aceite.
 - Nada é enviado nem gravado na planilha pelo app.
 - O e-mail gerado é lido de volta sem perdas pela importação por e-mail.
@@ -141,7 +141,7 @@ A logo oficial (`Logo.html`, PNG embutido) e o ícone S/R (favicon) vieram de so
 | `TestesEmail.js` | Testes do interpretador (cenários do e-mail) |
 | `Status.js` | Formalização e situação (colunas R, S, U, V) |
 | `Gmail.js` | Rascunho no Gmail (HTML formatado, assinatura, fotos) e configuração do e-mail |
-| `ConfigEmail.html` | Tela ⚙ Configurações do e-mail |
+| `ConfigEmail.html` | Tela ⚙ Perfis do e-mail |
 | `Consultas.js` | Listagem das ocorrências por período e pasta de fotos do protocolo |
 | `Bloqueios.js` | Leitura do `.ods` do Santri e cruzamento com a DATABASE (regras puras e `analisarBloqueios`) |
 | `TestesBloqueios.js` | Testes do cruzamento de bloqueios |

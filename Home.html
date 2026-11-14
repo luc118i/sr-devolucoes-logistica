@@ -657,9 +657,10 @@
   function maiusc(s) { return String(s || '').toLocaleUpperCase('pt-BR'); }
 
   /** Assunto e corpo no formato do e-mail de ocorrência (o interpretador da importação lê o mesmo formato). */
-  function montarEmail(linhas, usuario, hora) {
+  function montarEmail(linhas, usuario, hora, assuntoModelo) {
     var b = linhas[0];
-    var assunto = 'Seguem dados Ref. ocorrência da NF: ' + milhar(so(b.nf) || b.nf) + ' - SR Recebimento';
+    var nfFmt = milhar(so(b.nf) || b.nf);
+    var assunto = String(assuntoModelo || 'Seguem dados Ref. ocorrência da NF: {NF} - SR Recebimento').replace(/\{nf\}/gi, nfFmt).replace(/[\r\n]+/g, ' ').trim();
     var tipos = unicos(linhas.map(function (o) { return o.tipo; }));
     var opcoes = CATEGORIAS_MODELO.slice();
     tipos.forEach(function (t) { if (!opcoes.some(function (c) { return SR.normalizar(c) === SR.normalizar(t); })) opcoes.push(t); });
@@ -719,13 +720,41 @@
     var inAssunto = h('input', { type: 'text', 'aria-label': 'Assunto do e-mail' });
     var taCorpo = h('textarea', { rows: '16', spellcheck: 'false', 'aria-label': 'Texto do e-mail' });
     var resultadoGmail = h('div', { 'aria-live': 'polite' });
+    var perfis = (SR.configEmail && SR.configEmail.perfis) || [];
+    var perfilAtual = function () {
+      var id = selPerfil && selPerfil.value;
+      for (var i = 0; i < perfis.length; i++) if (perfis[i].id === id) return perfis[i];
+      return perfis[0] || {};
+    };
+    var selPerfil = null;
+    var infoPerfil = h('div', { class: 'fotos-box', style: 'display:grid;gap:4px' });
+    var desenharPerfil = function () {
+      var p = perfilAtual();
+      limpar(infoPerfil);
+      if (p.de) infoPerfil.appendChild(h('span', {}, [h('b', {}, 'De: '), p.de]));
+      infoPerfil.appendChild(h('span', {}, [h('b', {}, 'Para: '), (p.para && p.para.length) ? p.para.join(', ') : 'não configurado (preencha no Gmail)']));
+      if (p.cc && p.cc.length) infoPerfil.appendChild(h('span', {}, [h('b', {}, 'Cc: '), p.cc.join(', ')]));
+      infoPerfil.appendChild(h('span', { class: 'item-meta' }, 'Assinatura: ' + (p.temAssinatura ? 'imagem configurada' : 'nenhuma')));
+      infoPerfil.appendChild(h('button', { type: 'button', class: 'link', style: 'justify-self:start', onclick: function () { if (window.SRConfigEmail) SRConfigEmail.abrir(); } }, 'Configurar perfis'));
+    };
     var gerar = function () {
       var linhas = mesmos.filter(function (x) { return incluir[x.linha]; });
       if (!linhas.length) { inAssunto.value = ''; taCorpo.value = ''; return; }
       var hora = new Date().getHours();
-      var e = montarEmail(linhas, (SR.configEmail && SR.configEmail.nome) || st.usuario, hora);
+      var p = perfilAtual();
+      var e = montarEmail(linhas, p.formatador || st.usuario, hora, p.assunto);
       inAssunto.value = e.assunto; taCorpo.value = e.corpo;
     };
+    if (perfis.length) {
+      var lembrado = ''; try { lembrado = localStorage.getItem('sr_perfil_email') || ''; } catch (e) { lembrado = ''; }
+      selPerfil = h('select', { 'aria-label': 'Perfil do e-mail' }, perfis.map(function (p) {
+        return h('option', { value: p.id, selected: p.id === lembrado }, p.nome);
+      }));
+      selPerfil.addEventListener('change', function () {
+        try { localStorage.setItem('sr_perfil_email', selPerfil.value); } catch (e) { /* sem armazenamento: vale só agora */ }
+        desenharPerfil(); gerar();
+      });
+    }
 
     /** Cria o rascunho (texto + fotos dos protocolos) e abre no Gmail numa nova aba. */
     var abrirGmail = function () {
@@ -740,7 +769,7 @@
       if (janela) { try { janela.document.write('<p style="font:16px system-ui;padding:24px">Preparando o rascunho no Gmail…</p>'); } catch (e) { /* outra origem */ } }
       limpar(resultadoGmail);
       SR.chamar('criarRascunhoGmail', [{
-        assunto: inAssunto.value, texto: taCorpo.value,
+        assunto: inAssunto.value, texto: taCorpo.value, perfilId: perfilAtual().id || '',
         protocolos: linhas.map(function (x) { return x.protocolo; }).filter(Boolean)
       }], 'Criando o rascunho com as fotos…').then(function (r) {
         if (janela && !janela.closed) janela.location.href = r.url;
@@ -784,14 +813,10 @@
         }))
       ]));
     }
-    var ce = SR.configEmail || {};
-    corpo.appendChild(h('section', { class: 'painel-secao' }, [h('h3', {}, 'Destinatários'),
-      h('div', { class: 'fotos-box', style: 'display:grid;gap:4px' }, [
-        h('span', {}, [h('b', {}, 'Para: '), (ce.para && ce.para.length) ? ce.para.join(', ') : 'não configurado (preencha no Gmail)']),
-        ce.cc && ce.cc.length ? h('span', {}, [h('b', {}, 'Cc: '), ce.cc.join(', ')]) : null,
-        h('span', { class: 'item-meta' }, 'Assinatura: ' + (ce.temAssinatura ? 'imagem configurada' : 'nenhuma')),
-        h('button', { type: 'button', class: 'link', style: 'justify-self:start', onclick: function () { if (window.SRConfigEmail) SRConfigEmail.abrir(); } }, 'Configurar e-mail')
-      ])]));
+    desenharPerfil();
+    corpo.appendChild(h('section', { class: 'painel-secao' }, [h('h3', {}, 'Perfil e destinatários'),
+      selPerfil ? h('div', { style: 'margin-bottom:8px' }, selPerfil) : null,
+      infoPerfil]));
     corpo.appendChild(h('section', { class: 'painel-secao' }, [h('h3', {}, 'Assunto'), inAssunto]));
     corpo.appendChild(h('section', { class: 'painel-secao' }, [h('h3', {}, 'Texto'), taCorpo,
       h('p', { class: 'item-meta', style: 'margin:6px 0 0' }, 'Dá para ajustar o texto. O rascunho vai com as fotos do protocolo e, ao criá-lo, o protocolo já fica marcado como formalizado (dá para desfazer). Nada é enviado: você revisa e envia pelo Gmail.')]));

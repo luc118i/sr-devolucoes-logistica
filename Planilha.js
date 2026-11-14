@@ -3,10 +3,14 @@
  * parâmetros da CONFIG_APP e gravação das ocorrências.
  */
 
+var planilhaAberta_ = null; // cada execução do Apps Script começa com globais novas: vale só durante a chamada
+
 function planilha_() {
+  if (planilhaAberta_) return planilhaAberta_; // openById custa centenas de ms e era refeito a cada aba_()
   var id = PropertiesService.getScriptProperties().getProperty('PLANILHA_ID') || CONFIG.PLANILHA_ID;
   var ss = id ? SpreadsheetApp.openById(id) : SpreadsheetApp.getActiveSpreadsheet();
   if (!ss) throw new Error('Planilha não encontrada: vincule o script à planilha ou defina a propriedade PLANILHA_ID.');
+  planilhaAberta_ = ss;
   return ss;
 }
 

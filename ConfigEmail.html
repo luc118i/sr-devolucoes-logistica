@@ -1,7 +1,8 @@
 <script>
 /**
- * ⚙ Configurações do e-mail de formalização: nome de quem formata (vai em "E-MAIL FORMATADO POR"),
- * destinatários (Para / Cc) e a imagem da assinatura. Fica na aba CONFIG_APP (vale para todos).
+ * ⚙ Perfis do e-mail de formalização. Cada perfil tem nome, modelo do assunto ({NF} vira o número da nota),
+ * nome de quem formata (vai em "E-MAIL FORMATADO POR"), destinatários (Para / Cc) e a imagem da assinatura.
+ * Ficam na aba CONFIG_APP (valem para todos); quem formaliza escolhe o perfil na hora.
  */
 (function () {
   'use strict';
@@ -11,6 +12,8 @@
   var MAX = 1024 * 1024;
   var LARGURA_MAX = 1200; // mostrada a 600 px no e-mail: fica nítida em telas de alta resolução
   var ALTURA_MAX = 600;
+  var MAX_PERFIS = 10;
+  var ASSUNTO_PADRAO = 'Seguem dados Ref. ocorrência da NF: {NF} - SR Recebimento';
   var aberta = false, aoColar = null;
 
   /**
@@ -46,7 +49,7 @@
     });
   }
 
-  // Ctrl+V de imagem com as configurações abertas vai para a assinatura (e não para as fotos da ocorrência).
+  // Ctrl+V de imagem com as configurações abertas vai para a assinatura do perfil em foco (e não para as fotos da ocorrência).
   document.addEventListener('paste', function (ev) {
     if (!aberta || !aoColar || $('modal').classList.contains('oculto')) return;
     var itens = (ev.clipboardData && ev.clipboardData.items) || [];
@@ -69,18 +72,29 @@
     });
   }
 
-  function mostrar(c) {
+  /** Bloco de um perfil: campos + assinatura. Devolve {el, ler(), foco()}. */
+  function blocoPerfil(p, aoRemover, conta) {
     var nova = null, remover = false;
-    var inNome = h('input', { type: 'text', maxlength: 80, value: c.nome, placeholder: 'Ex.: Ednaldo — Entrada de Notas' });
-    var inPara = h('input', { type: 'text', value: c.para, placeholder: 'compras@soreparos.com.br, fiscal@soreparos.com.br', inputmode: 'email' });
-    var inCc = h('input', { type: 'text', value: c.cc, placeholder: 'opcional', inputmode: 'email' });
+    var inNome = h('input', { type: 'text', maxlength: 40, value: p.nome || '', placeholder: 'Ex.: Recebimento, Reversa' });
+    var inAssunto = h('input', { type: 'text', maxlength: 200, value: p.assunto || ASSUNTO_PADRAO, placeholder: ASSUNTO_PADRAO });
+    var inFormatador = h('input', { type: 'text', maxlength: 80, value: p.formatador || '', placeholder: 'Ex.: Ednaldo — Entrada de Notas' });
+    var inDe = h('input', { type: 'text', value: p.de || '', placeholder: 'Vazio = a conta que executa o app', inputmode: 'email' });
+    var inPara = h('input', { type: 'text', value: p.para || '', placeholder: 'compras@soreparos.com.br, fiscal@soreparos.com.br', inputmode: 'email' });
+    var inCc = h('input', { type: 'text', value: p.cc || '', placeholder: 'opcional', inputmode: 'email' });
     var arquivo = h('input', { type: 'file', accept: 'image/*', hidden: true });
     var previa = h('div', { class: 'zona-fotos', tabindex: '0', role: 'button', 'aria-label': 'Escolher imagem da assinatura', style: 'padding:16px' });
     var erro = h('div');
+    var exemplo = h('span', { class: 'item-meta', style: 'font-weight:400' });
+
+    var atualizarExemplo = function () {
+      exemplo.textContent = 'Fica assim: ' + (inAssunto.value || ASSUNTO_PADRAO).replace(/\{nf\}/gi, '3.046.462');
+    };
+    inAssunto.addEventListener('input', atualizarExemplo);
+    atualizarExemplo();
 
     var desenhar = function () {
       limpar(previa);
-      var src = nova ? nova.dataUrl : (remover ? '' : c.assinatura);
+      var src = nova ? nova.dataUrl : (remover ? '' : p.assinatura);
       if (src) {
         previa.appendChild(h('img', { src: src, alt: 'Assinatura', style: 'max-width:100%;max-height:160px;margin:0 auto;display:block' }));
         previa.appendChild(h('div', { class: 'item-meta' }, nova ? 'Nova imagem (' + nova.largura + '×' + nova.altura + ' px, ' + Math.round(nova.base64.length * 0.75 / 1024) + ' KB) — clique, arraste ou cole outra para trocar'
@@ -96,7 +110,6 @@
       prepararAssinatura(f).then(function (r) { nova = r; remover = false; desenhar(); })
         .catch(function (e) { erro.appendChild(SR.msg('erro', e.message)); });
     };
-    aoColar = usar; aberta = true;
     previa.addEventListener('click', function () { arquivo.click(); });
     previa.addEventListener('keydown', function (ev) { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); arquivo.click(); } });
     ['dragenter', 'dragover'].forEach(function (t) { previa.addEventListener(t, function (ev) { ev.preventDefault(); previa.classList.add('arrastando'); }); });
@@ -105,33 +118,87 @@
     arquivo.addEventListener('change', function () { var f = arquivo.files && arquivo.files[0]; arquivo.value = ''; usar(f); });
     desenhar();
 
-    var tirar = SR.botao('Remover assinatura', 'leve pequeno', function () { nova = null; remover = true; desenhar(); });
-
-    SR.abrirModal('Configurações do e-mail', [
-      h('p', { class: 'item-meta', style: 'margin:0 0 16px' }, 'Usado no "Formalizar e-mail". Os rascunhos são criados no Gmail de ' + c.conta + ' e valem para todos que usam o aplicativo.'),
-      campo('Nome em "E-mail formatado por"', inNome, 'Vazio = usa o e-mail de quem está logado.'),
+    var el = h('section', { class: 'painel-secao', style: 'border:1px solid var(--borda, #ddd);border-radius:10px;padding:14px;margin-bottom:14px' }, [
+      campo('Nome do perfil', inNome),
+      campo('Assunto', inAssunto),
+      h('div', { style: 'margin:-6px 0 12px' }, [h('span', { class: 'item-meta', style: 'display:block' }, 'Use {NF} onde entra o número da nota.'), exemplo]),
+      campo('Nome em "E-mail formatado por"', inFormatador, 'Vazio = usa o e-mail de quem está logado.'),
+      campo('De (remetente)', inDe, 'Precisa estar cadastrado como "Enviar e-mail como" no Gmail de ' + conta + ' (Configurações › Contas e importação). Sem isso o Gmail usa o endereço dessa conta.'),
       campo('Para', inPara, 'Separe vários endereços por vírgula.'),
       campo('Cc', inCc),
       h('div', { style: 'display:grid;gap:8px' }, [h('span', { style: 'font-size:13px;font-weight:500;color:var(--texto-2)' }, 'Assinatura (imagem no fim do e-mail)'), previa, arquivo,
-        h('div', {}, tirar)]),
+        h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap' }, [
+          SR.botao('Remover assinatura', 'leve pequeno', function () { nova = null; remover = true; desenhar(); }),
+          SR.botao('Excluir este perfil', 'leve pequeno', function () { aoRemover(); })
+        ])]),
+      erro
+    ]);
+    el.addEventListener('focusin', function () { aoColar = usar; });
+    el.addEventListener('pointerdown', function () { aoColar = usar; });
+    return {
+      el: el,
+      foco: function () { inNome.focus(); },
+      ler: function () {
+        return { id: p.id || '', nome: inNome.value, assunto: inAssunto.value, formatador: inFormatador.value, de: inDe.value, para: inPara.value, cc: inCc.value,
+          removerAssinatura: remover, assinatura: nova ? { tipo: nova.tipo, base64: nova.base64 } : null };
+      }
+    };
+  }
+
+  function mostrar(c) {
+    var blocos = [];
+    var lista = h('div');
+    var erro = h('div');
+    var botaoNovo;
+    var atualizarBotao = function () { if (botaoNovo) botaoNovo.disabled = blocos.length >= MAX_PERFIS; };
+    var adicionar = function (p) {
+      var b = blocoPerfil(p, function () {
+        if (blocos.length <= 1) { limpar(erro).appendChild(SR.msg('erro', 'Mantenha ao menos um perfil.')); return; }
+        if (!window.confirm('Excluir este perfil e a imagem da assinatura dele? (Só vale depois de Salvar.)')) return;
+        blocos.splice(blocos.indexOf(b), 1);
+        b.el.remove();
+        atualizarBotao();
+      }, c.conta);
+      blocos.push(b);
+      lista.appendChild(b.el);
+      atualizarBotao();
+      return b;
+    };
+    (c.perfis || []).forEach(adicionar);
+    if (!blocos.length) adicionar({});
+    aberta = true; aoColar = null;
+
+    botaoNovo = SR.botao('+ Adicionar perfil', 'leve', function () {
+      var b = adicionar({ nome: '', assunto: ASSUNTO_PADRAO });
+      b.el.scrollIntoView({ block: 'nearest' });
+      b.foco();
+    });
+    atualizarBotao();
+
+    SR.abrirModal('Perfis do e-mail', [
+      h('p', { class: 'item-meta', style: 'margin:0 0 16px' }, 'Cada perfil tem o seu assunto e a sua assinatura; você escolhe o perfil na hora de formalizar. Os rascunhos são criados no Gmail de ' + c.conta + ' e os perfis valem para todos que usam o aplicativo.'),
+      lista,
+      h('div', { style: 'margin-bottom:12px' }, botaoNovo),
       erro
     ], [
-      SR.botao('Cancelar', 'leve', SR.fecharModal),
+      SR.botao('Cancelar', 'leve', function () { aberta = false; SR.fecharModal(); }),
       SR.botao('Salvar', 'primario', function () {
         limpar(erro);
-        var dados = { nome: inNome.value, para: inPara.value, cc: inCc.value, removerAssinatura: remover,
-          assinatura: nova ? { tipo: nova.tipo, base64: nova.base64 } : null };
-        SR.chamar('salvarConfigEmail', [dados], 'Salvando…').then(function (r) {
-          SR.configEmail = { nome: r.nome, para: r.para ? r.para.split(/,\s*/) : [], cc: r.cc ? r.cc.split(/,\s*/) : [], temAssinatura: !!r.assinatura };
+        SR.chamar('salvarConfigEmail', [{ perfis: blocos.map(function (b) { return b.ler(); }) }], 'Salvando…').then(function (r) {
+          SR.configEmail = { perfis: (r.perfis || []).map(function (p) {
+            return { id: p.id, nome: p.nome, de: p.de, assunto: p.assunto, formatador: p.formatador,
+              para: p.para ? p.para.split(/,\s*/) : [], cc: p.cc ? p.cc.split(/,\s*/) : [], temAssinatura: !!p.assinatura };
+          }) };
+          aberta = false;
           SR.fecharModal();
-          SR.toast('Configurações do e-mail salvas.');
+          SR.toast('Perfis do e-mail salvos.');
           document.dispatchEvent(new Event('sr-config-email'));
         }).catch(function (e) {
           erro.appendChild(SR.msg('erro', SR.erroServidor(e)));
         });
       })
     ]);
-    setTimeout(function () { inNome.focus(); }, 50);
+    setTimeout(function () { if (blocos[0]) blocos[0].foco(); }, 50);
   }
 
   $('btnConfigEmail').addEventListener('click', abrir);

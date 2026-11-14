@@ -82,22 +82,33 @@ function listarOcorrencias(inicio, fim) {
     var p = validarPeriodo(inicio, fim);
     var c = contextoOcorrencias_();
     var sh = c.sheet;
-    var ult = proximaLinha_(sh, c.mapa) - 1;
+    // Só linhas com data contam aqui: a última data basta (proximaLinha_ olharia cada coluna do registro).
+    var ult = ultimaLinhaComDado_(sh, c.mapa.data);
     if (ult < CONFIG.PRIMEIRA_LINHA_DADOS) return { itens: [], total: 0, limitado: false };
 
     var n = ult - CONFIG.PRIMEIRA_LINHA_DADOS + 1;
-    var valores = sh.getRange(CONFIG.PRIMEIRA_LINHA_DADOS, 1, n, c.largura).getValues();
-    var textos = sh.getRange(CONFIG.PRIMEIRA_LINHA_DADOS, 1, n, c.largura).getDisplayValues();
     var iniMs = p.inicio.getTime(), fimMs = p.fim.getTime();
 
-    var itens = [];
+    // 1) só a coluna da data (barata); 2) as demais colunas apenas do trecho que cobre o período
+    var datas = sh.getRange(CONFIG.PRIMEIRA_LINHA_DADOS, c.mapa.data, n, 1).getValues();
+    var dias = [], primeiro = -1, ultimo = -1;
     for (var i = 0; i < n; i++) {
-      var bruto = valores[i][c.mapa.data - 1];
+      var bruto = datas[i][0];
       if (!(bruto instanceof Date)) continue;
       var dia = Utilities.formatDate(bruto, c.tz, 'yyyy-MM-dd');
       var ms = dataISO(dia).getTime();
       if (ms < iniMs || ms > fimMs) continue;
-      itens.push(c.item(CONFIG.PRIMEIRA_LINHA_DADOS + i, dia, valores[i], textos[i]));
+      dias[i] = dia;
+      if (primeiro < 0) primeiro = i;
+      ultimo = i;
+    }
+    var itens = [];
+    if (primeiro >= 0) {
+      var faixa = sh.getRange(CONFIG.PRIMEIRA_LINHA_DADOS + primeiro, 1, ultimo - primeiro + 1, c.largura);
+      var valores = faixa.getValues(), textos = faixa.getDisplayValues();
+      for (var j = primeiro; j <= ultimo; j++) {
+        if (dias[j]) itens.push(c.item(CONFIG.PRIMEIRA_LINHA_DADOS + j, dias[j], valores[j - primeiro], textos[j - primeiro]));
+      }
     }
     itens.sort(function (a, b) { return a.data < b.data ? 1 : a.data > b.data ? -1 : b.linha - a.linha; });
     var total = itens.length;
