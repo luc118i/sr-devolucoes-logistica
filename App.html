@@ -47,9 +47,25 @@
   function lembrar(chave, valor) { try { localStorage.setItem('ocorr_' + chave, valor); } catch (e) { /* sem armazenamento */ } }
   function lembrado(chave) { try { return localStorage.getItem('ocorr_' + chave) || ''; } catch (e) { return ''; } }
 
+  // Camadas que travam a rolagem da página de fundo (painel, modal, carregando): enquanto houver uma, o <html> não rola.
+  var travas = {};
+  function travar(nome) { travas[nome] = true; document.documentElement.classList.add('sem-rolagem'); }
+  function soltar(nome) { delete travas[nome]; if (!Object.keys(travas).length) document.documentElement.classList.remove('sem-rolagem'); }
+
+  var focoAntesCarga = null;
   function carregando(sim, texto) {
+    var el = $('carregando'), estavaOculto = el.classList.contains('oculto');
     $('carregandoTexto').textContent = texto || 'Carregando…';
-    $('carregando').classList.toggle('oculto', !sim);
+    el.classList.toggle('oculto', !sim);
+    if (sim) {
+      travar('carregando');
+      // O foco sai do botão clicado: Enter/Espaço não repetem a ação por trás do aviso.
+      if (estavaOculto) { focoAntesCarga = document.activeElement; el.setAttribute('tabindex', '-1'); el.focus({ preventScroll: true }); }
+    } else {
+      soltar('carregando');
+      if (!estavaOculto && focoAntesCarga && document.body.contains(focoAntesCarga)) { try { focoAntesCarga.focus({ preventScroll: true }); } catch (e) { /* sumiu */ } }
+      if (!estavaOculto) focoAntesCarga = null;
+    }
   }
   var timerToast;
   function toast(texto) {
@@ -537,7 +553,7 @@
     var p = montarPayload();
     var erros = validar(p);
     if (erros.length) {
-      abrirModal('Corrija antes de registrar', [msg('erro', 'Faltam informações:', erros)], [botao('Voltar', 'leve', fecharModal)]);
+      abrirModal('Corrija antes de registrar', [msg('erro', 'Faltam informações:', erros)], [botao('Voltar', 'leve', fecharModal)], { fundo: true });
       return;
     }
     var linhas = p.itens.map(function (i) {
@@ -565,7 +581,7 @@
     abrirModal('Revisar ocorrência', corpo, [
       botao('Voltar e editar', 'leve', fecharModal),
       botao('Confirmar e registrar', 'primario', function () { enviar(p); })
-    ]);
+    ], { fundo: true });
   });
 
   function enviar(p) {
@@ -816,15 +832,61 @@
 
   // ── modal ────────────────────────────────────────────────────────────────
   function botao(texto, estilo, acao) { return h('button', { type: 'button', class: 'btn ' + estilo, onclick: acao }, texto); }
-  function abrirModal(titulo, corpo, acoes) {
+  var modalOpcoes = null, focoAntesModal = null, fundoMousedown = null;
+  /**
+   * @param {{fundo?: boolean, aoFechar?: function(): boolean}=} opcoes  fundo: clicar fora fecha (só onde não há nada digitado);
+   *   aoFechar: devolve false para impedir o fechamento (ex.: alterações não salvas).
+   */
+  function abrirModal(titulo, corpo, acoes, opcoes) {
     $('modalTitulo').textContent = titulo;
     var c = limpar($('modalCorpo')); corpo.forEach(function (el) { if (el) c.appendChild(el); });
     var a = limpar($('modalAcoes')); acoes.forEach(function (b) { a.appendChild(b); });
+    var caixa = $('modal').querySelector('.modal-caixa');
+    if ($('modal').classList.contains('oculto')) focoAntesModal = document.activeElement;
+    modalOpcoes = opcoes || null;
     $('modal').classList.remove('oculto');
-    var ult = a.lastChild; if (ult) ult.focus();
+    travar('modal');
+    caixa.scrollTop = 0;
+    caixa.setAttribute('tabindex', '-1');
+    var ult = a.lastChild; if (ult) ult.focus(); else caixa.focus({ preventScroll: true });
   }
-  function fecharModal() { if (!estado.enviando) $('modal').classList.add('oculto'); }
-  document.addEventListener('keydown', function (ev) { if (ev.key === 'Escape') fecharModal(); });
+  /** Fecha o modal (respeitando aoFechar) e devolve o foco a quem o abriu. */
+  function fecharModal() {
+    if (estado.enviando || $('modal').classList.contains('oculto')) return;
+    if (modalOpcoes && modalOpcoes.aoFechar && modalOpcoes.aoFechar() === false) return;
+    fecharModalForcado();
+  }
+  function fecharModalForcado() {
+    if ($('modal').classList.contains('oculto')) return;
+    $('modal').classList.add('oculto');
+    modalOpcoes = null;
+    soltar('modal');
+    var f = focoAntesModal; focoAntesModal = null;
+    if (f && document.body.contains(f) && !f.closest('.oculto')) { try { f.focus({ preventScroll: true }); } catch (e) { /* sumiu */ } }
+  }
+  // Teclado: Esc fecha só o modal (e não o painel por baixo); Tab não sai dele nem passa por trás do "carregando".
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Tab' && !$('carregando').classList.contains('oculto')) { ev.preventDefault(); return; }
+    if ($('modal').classList.contains('oculto')) return;
+    if (ev.key === 'Escape') {
+      if (document.querySelector('.seletor-lista')) return; // lista de opções aberta: o Esc é dela
+      ev.stopPropagation(); ev.preventDefault(); fecharModal(); return;
+    }
+    if (ev.key !== 'Tab') return;
+    var f = [].filter.call($('modal').querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'),
+      function (e) { return !e.disabled && e.offsetParent !== null; });
+    if (!f.length) { ev.preventDefault(); return; }
+    var i = f.indexOf(document.activeElement);
+    if (i < 0) { ev.preventDefault(); f[ev.shiftKey ? f.length - 1 : 0].focus(); }
+    else if (ev.shiftKey && i === 0) { ev.preventDefault(); f[f.length - 1].focus(); }
+    else if (!ev.shiftKey && i === f.length - 1) { ev.preventDefault(); f[0].focus(); }
+  }, true);
+  $('modal').addEventListener('mousedown', function (ev) { fundoMousedown = ev.target; });
+  $('modal').addEventListener('click', function (ev) {
+    // só conta se o clique começou e terminou no fundo (selecionar texto e soltar fora não fecha)
+    if (ev.target === $('modal') && fundoMousedown === $('modal') && modalOpcoes && modalOpcoes.fundo) fecharModal();
+    fundoMousedown = null;
+  });
 
   window.addEventListener('beforeunload', function (ev) {
     if ((estado.itens.some(function (i) { return i.marcado; }) || estado.fotos.some(function (f) { return f.status !== 'ok'; })) && $('modal').classList.contains('oculto')) { ev.preventDefault(); ev.returnValue = ''; }
@@ -860,7 +922,7 @@
     h: h, limpar: limpar, msg: msg, toast: toast, chamar: chamar, erroServidor: erroServidor, num: num,
     normalizar: normalizar, lembrar: lembrar, lembrado: lembrado, irPara: irPara, numeroBR: numeroBR, carregando: carregando,
     montarDeBloqueio: montarDeBloqueio,
-    abrirModal: abrirModal, fecharModal: fecharModal, botao: botao, configEmail: null,
+    abrirModal: abrirModal, fecharModal: fecharModal, fecharModalForcado: fecharModalForcado, travar: travar, soltar: soltar, botao: botao, configEmail: null,
     /** Para a importação por e-mail preencher o formulário existente. */
     form: {
       estado: estado,

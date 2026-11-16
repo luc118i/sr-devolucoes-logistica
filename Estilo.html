@@ -71,7 +71,9 @@
 
   /* ── Base ─────────────────────────────────────────────────────────────── */
   * { box-sizing: border-box; }
-  html { -webkit-text-size-adjust: 100%; }
+  html { -webkit-text-size-adjust: 100%; scrollbar-gutter: stable; } /* a barra não some/volta: nada salta ao abrir painel ou modal */
+  html.sem-rolagem, html.sem-rolagem body { overflow: hidden; } /* painel, modal e carregando travam a página de fundo */
+  .modal-caixa, .painel-corpo, .resultados-sr, .filtro-valores, .popover, .quadro-cartoes, .original-email pre { overscroll-behavior: contain; }
   body {
     margin: 0; background: var(--fundo); color: var(--texto);
     font: 400 var(--fs-base)/var(--lh) var(--fonte);
@@ -129,6 +131,9 @@
   .btn.primario { background: var(--primaria); color: var(--primaria-texto); box-shadow: var(--sombra-1); }
   .btn.primario:hover:not(:disabled) { background: var(--primaria-hover); }
   .btn.leve { background: var(--superficie); border-color: var(--borda-forte); color: var(--texto); }
+  .btn.perigo { background: var(--superficie); border-color: var(--erro); color: var(--erro); }
+  .btn.perigo:hover:not(:disabled) { background: var(--erro-fundo); }
+  .btn.perigo.confirmando { background: var(--erro); color: #fff; }
   .btn.leve:hover:not(:disabled) { background: var(--superficie-afundada); }
   .btn.fantasma { background: transparent; color: var(--primaria); }
   .btn.fantasma:hover { background: var(--primaria-suave); }
@@ -310,7 +315,7 @@
   .giro-mini { width: 14px; height: 14px; border: 2px solid var(--borda); border-top-color: var(--primaria); border-radius: 50%; animation: girar .7s linear infinite; flex: none; }
   .chip-periodo.em-carga .faixa { color: var(--primaria); }
   @media (prefers-reduced-motion: reduce) { .lista-ocorrencias.em-carga::before { animation: none; background: var(--primaria); opacity: .5; } }
-  .grupo-dia { position: sticky; top: 56px; z-index: 2; padding: 10px var(--e-4); background: rgba(250, 250, 252, .94); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); border-bottom: 1px solid var(--borda); font-size: var(--fs-xs); font-weight: 600; color: var(--texto-2); display: flex; justify-content: space-between; }
+  .grupo-dia { position: sticky; top: 57px; z-index: 2; padding: 10px var(--e-4); background: rgba(250, 250, 252, .94); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); border-bottom: 1px solid var(--borda); font-size: var(--fs-xs); font-weight: 600; color: var(--texto-2); display: flex; justify-content: space-between; }
   .grupo-dia + .oc, .oc + .oc { border-top: 1px solid var(--borda); }
   .grupo-dia span:last-child { color: var(--texto-3); font-weight: 500; }
 
@@ -484,10 +489,17 @@
   .modal { position: fixed; inset: 0; z-index: 40; background: rgba(29, 29, 31, .4); display: grid; place-items: center; padding: var(--gutter); animation: aparecer var(--medio) var(--curva); }
   .modal-caixa { background: var(--superficie); border-radius: var(--r-xl); padding: var(--e-6); width: min(980px, 100%); max-height: 88vh; overflow: auto; box-shadow: var(--sombra-3); animation: surgir var(--medio) var(--curva); }
   .modal-caixa h2 { margin: 0 0 var(--e-3); font-size: var(--fs-lg); font-weight: 700; letter-spacing: -0.01em; }
-  .modal-acoes { display: flex; justify-content: flex-end; gap: var(--e-2); margin-top: var(--e-5); flex-wrap: wrap; }
+  /* Ações sempre à vista: em modais longos (ex.: perfis de e-mail) o Salvar não fica no fim da rolagem */
+  .modal-acoes {
+    display: flex; justify-content: flex-end; gap: var(--e-2); margin-top: var(--e-5); flex-wrap: wrap;
+    position: sticky; bottom: calc(var(--e-6) * -1); z-index: 1;
+    padding: var(--e-4) 0 var(--e-6); margin-bottom: calc(var(--e-6) * -1);
+    background: linear-gradient(to top, var(--superficie) 72%, transparent);
+  }
   @media (max-width: 599px) {
     .modal { place-items: end stretch; padding: 0; }
     .modal-caixa { border-radius: var(--r-xl) var(--r-xl) 0 0; max-height: 92vh; padding: var(--e-5) var(--gutter) calc(var(--e-5) + var(--seguro-baixo)); animation: subir var(--medio) var(--curva); }
+    .modal-acoes { bottom: calc((var(--e-5) + var(--seguro-baixo)) * -1); padding-bottom: calc(var(--e-5) + var(--seguro-baixo)); margin-bottom: calc((var(--e-5) + var(--seguro-baixo)) * -1); }
     .modal-acoes .btn { flex: 1 1 100%; }
   }
   table { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); }

@@ -118,18 +118,27 @@
     arquivo.addEventListener('change', function () { var f = arquivo.files && arquivo.files[0]; arquivo.value = ''; usar(f); });
     desenhar();
 
+    // Exclusão em dois passos (sem janela nativa): o 1º clique pede confirmação, o 2º exclui.
+    var btnExcluir = SR.botao('Excluir este perfil', 'perigo pequeno', function () {
+      if (!btnExcluir.classList.contains('confirmando')) {
+        btnExcluir.classList.add('confirmando'); btnExcluir.textContent = 'Confirmar exclusão';
+        setTimeout(function () { btnExcluir.classList.remove('confirmando'); btnExcluir.textContent = 'Excluir este perfil'; }, 4000);
+        return;
+      }
+      aoRemover();
+    });
     var el = h('section', { class: 'painel-secao', style: 'border:1px solid var(--borda, #ddd);border-radius:10px;padding:14px;margin-bottom:14px' }, [
       campo('Nome do perfil', inNome),
       campo('Assunto', inAssunto),
       h('div', { style: 'margin:-6px 0 12px' }, [h('span', { class: 'item-meta', style: 'display:block' }, 'Use {NF} onde entra o número da nota.'), exemplo]),
       campo('Nome em "E-mail formatado por"', inFormatador, 'Vazio = usa o e-mail de quem está logado.'),
-      campo('De (remetente)', inDe, 'Precisa estar cadastrado como "Enviar e-mail como" no Gmail de ' + conta + ' (Configurações › Contas e importação). Sem isso o Gmail usa o endereço dessa conta.'),
+      campo('De (remetente)', inDe, 'Precisa constar em "Enviar e-mail como" no Gmail de ' + conta + '; senão o Gmail usa o endereço dessa conta.'),
       campo('Para', inPara, 'Separe vários endereços por vírgula.'),
       campo('Cc', inCc),
       h('div', { style: 'display:grid;gap:8px' }, [h('span', { style: 'font-size:13px;font-weight:500;color:var(--texto-2)' }, 'Assinatura (imagem no fim do e-mail)'), previa, arquivo,
         h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap' }, [
           SR.botao('Remover assinatura', 'leve pequeno', function () { nova = null; remover = true; desenhar(); }),
-          SR.botao('Excluir este perfil', 'leve pequeno', function () { aoRemover(); })
+          btnExcluir
         ])]),
       erro
     ]);
@@ -154,7 +163,6 @@
     var adicionar = function (p) {
       var b = blocoPerfil(p, function () {
         if (blocos.length <= 1) { limpar(erro).appendChild(SR.msg('erro', 'Mantenha ao menos um perfil.')); return; }
-        if (!window.confirm('Excluir este perfil e a imagem da assinatura dele? (Só vale depois de Salvar.)')) return;
         blocos.splice(blocos.indexOf(b), 1);
         b.el.remove();
         atualizarBotao();
@@ -167,6 +175,15 @@
     (c.perfis || []).forEach(adicionar);
     if (!blocos.length) adicionar({});
     aberta = true; aoColar = null;
+    var inicial = JSON.stringify(blocos.map(function (b) { return b.ler(); })), avisou = false;
+    lista.addEventListener('input', function () { avisou = false; });
+    // Esc / Cancelar com alterações não salvas: avisa primeiro; o segundo pedido descarta.
+    var aoFechar = function () {
+      if (avisou || JSON.stringify(blocos.map(function (b) { return b.ler(); })) === inicial) { aberta = false; return true; }
+      avisou = true;
+      limpar(erro).appendChild(SR.msg('aviso', 'Há alterações não salvas. Feche de novo (Esc ou Cancelar) para descartá-las, ou clique em Salvar.'));
+      return false;
+    };
 
     botaoNovo = SR.botao('+ Adicionar perfil', 'leve', function () {
       var b = adicionar({ nome: '', assunto: ASSUNTO_PADRAO });
@@ -181,7 +198,7 @@
       h('div', { style: 'margin-bottom:12px' }, botaoNovo),
       erro
     ], [
-      SR.botao('Cancelar', 'leve', function () { aberta = false; SR.fecharModal(); }),
+      SR.botao('Cancelar', 'leve', function () { SR.fecharModal(); }),
       SR.botao('Salvar', 'primario', function () {
         limpar(erro);
         SR.chamar('salvarConfigEmail', [{ perfis: blocos.map(function (b) { return b.ler(); }) }], 'Salvando…').then(function (r) {
@@ -190,14 +207,14 @@
               para: p.para ? p.para.split(/,\s*/) : [], cc: p.cc ? p.cc.split(/,\s*/) : [], temAssinatura: !!p.assinatura };
           }) };
           aberta = false;
-          SR.fecharModal();
+          SR.fecharModalForcado();
           SR.toast('Perfis do e-mail salvos.');
           document.dispatchEvent(new Event('sr-config-email'));
         }).catch(function (e) {
           erro.appendChild(SR.msg('erro', SR.erroServidor(e)));
         });
       })
-    ]);
+    ], { aoFechar: aoFechar });
     setTimeout(function () { if (blocos[0]) blocos[0].foco(); }, 50);
   }
 

@@ -620,7 +620,7 @@
 
     $('veuPainel').classList.remove('oculto');
     $('painel').classList.remove('oculto');
-    document.body.style.overflow = 'hidden';
+    SR.travar('painel');
     $('btnFecharPainel').focus();
 
     var meu = st.abertoEm = {};
@@ -945,7 +945,7 @@
     st.abertoEm = null;
     $('painel').classList.add('oculto');
     $('veuPainel').classList.add('oculto');
-    document.body.style.overflow = '';
+    SR.soltar('painel');
     if (devolverFoco !== false && st.focoAntes && document.body.contains(st.focoAntes)) st.focoAntes.focus();
   }
   $('btnFecharPainel').addEventListener('click', function () { fecharDetalhe(); });
@@ -998,7 +998,7 @@
       corpo.scrollTop = 0;
       $('veuPainel').classList.remove('oculto');
       $('painel').classList.remove('oculto');
-      document.body.style.overflow = 'hidden';
+      SR.travar('painel');
       $('btnFecharPainel').focus();
     },
     fecharPainel: function () { fecharDetalhe(false); },
