@@ -13,7 +13,8 @@
   var MESES = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
   var DIAS = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
   var PRESETS = {
-    semana: 'Esta semana', semanaAnterior: 'Semana anterior', ultimos7: 'Últimos 7 dias', mes: 'Este mês', personalizado: 'Período'
+    semana: 'Esta semana', semanaAnterior: 'Semana anterior', ultimos7: 'Últimos 7 dias', mes: 'Este mês',
+    mesAnterior: 'Mês anterior', ultimos3m: 'Últimos 3 meses', personalizado: 'Período'
   };
 
   var st = {
@@ -36,6 +37,17 @@
     }
     if (preset === 'ultimos7') return { preset: preset, inicio: somar(hoje, -6), fim: hoje };
     var d = paraData(hoje);
+    if (preset === 'mesAnterior') {
+      return { preset: preset, inicio: paraIso(new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 1, 1))),
+        fim: paraIso(new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 0))) };
+    }
+    if (preset === 'ultimos3m') {
+      // mesmo dia de 3 meses atrás (31/05 → 28/02: não passa para o mês seguinte)
+      var alvo = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 3, 1));
+      var ultimo = new Date(Date.UTC(alvo.getUTCFullYear(), alvo.getUTCMonth() + 1, 0)).getUTCDate();
+      alvo.setUTCDate(Math.min(d.getUTCDate(), ultimo));
+      return { preset: preset, inicio: paraIso(alvo), fim: hoje };
+    }
     var ini = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
     var fim = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0));
     return { preset: 'mes', inicio: paraIso(ini), fim: paraIso(fim) };
@@ -119,11 +131,32 @@
     if (veuMobile) { veuMobile.remove(); veuMobile = null; }
     if (devolverFoco !== false) $('btnPeriodo').focus();
   }
-  // Só o atalho fica salvo (recalculado ao abrir); período com datas escolhidas volta para "Esta semana"
-  var ATALHOS_SALVOS = ['semana', 'semanaAnterior', 'ultimos7', 'mes'];
+  // A preferência de período fica no navegador (localStorage) e volta ao reabrir o app:
+  //   atalho ........ "mes" (recalculado a cada abertura)
+  //   até hoje ...... "dias:90" (datas escolhidas que terminam hoje: acompanham o dia de hoje)
+  //   datas fixas ... "fixo:2026-08-01|2026-09-30"
+  var ATALHOS_SALVOS = ['semana', 'semanaAnterior', 'ultimos7', 'mes', 'mesAnterior', 'ultimos3m'];
+  var ISO = /^\d{4}-\d{2}-\d{2}$/;
+  function codigoDoPeriodo(p) {
+    if (ATALHOS_SALVOS.indexOf(p.preset) >= 0) return p.preset;
+    if (p.fim === st.hoje) return 'dias:' + (Math.round((paraData(p.fim) - paraData(p.inicio)) / 86400000) + 1);
+    return 'fixo:' + p.inicio + '|' + p.fim;
+  }
+  /** Período guardado → objeto período; qualquer coisa estranha volta para "Esta semana" (pura, usa st.hoje). */
+  function periodoSalvo(codigo, hoje) {
+    codigo = String(codigo || '');
+    if (ATALHOS_SALVOS.indexOf(codigo) >= 0) return periodoDe(codigo, hoje);
+    var m = /^dias:(\d{1,3})$/.exec(codigo);
+    if (m && +m[1] >= 1 && +m[1] <= 366) return { preset: 'personalizado', inicio: somar(hoje, -(+m[1] - 1)), fim: hoje };
+    m = /^fixo:(\d{4}-\d{2}-\d{2})\|(\d{4}-\d{2}-\d{2})$/.exec(codigo);
+    if (m && ISO.test(m[1]) && ISO.test(m[2]) && m[1] <= m[2] && m[2] <= hoje && (paraData(m[2]) - paraData(m[1])) / 86400000 <= 366) {
+      return { preset: 'personalizado', inicio: m[1], fim: m[2] };
+    }
+    return periodoDe('semana', hoje);
+  }
   function aplicarPeriodo(p) {
     st.periodo = p;
-    SR.lembrar('periodo', ATALHOS_SALVOS.indexOf(p.preset) >= 0 ? p.preset : '');
+    SR.lembrar('periodo', codigoDoPeriodo(p));
     atualizarChip();
     fecharPeriodo();
     carregar(true);
@@ -140,7 +173,7 @@
     var erro = !a || !b ? 'Escolha as duas datas.' : b < a ? 'A data final é anterior à inicial.'
       : (paraData(b) - paraData(a)) / 86400000 > 366 ? 'Escolha um período de até 1 ano.' : '';
     if (erro) { limpar($('erroPeriodo')).appendChild(SR.msg('erro', erro)); return; }
-    var igualAtalho = ['semana', 'semanaAnterior', 'ultimos7', 'mes'].filter(function (k) {
+    var igualAtalho = ATALHOS_SALVOS.filter(function (k) {
       var p = periodoDe(k, st.hoje); return p.inicio === a && p.fim === b;
     })[0];
     aplicarPeriodo(igualAtalho ? periodoDe(igualAtalho, st.hoje) : { preset: 'personalizado', inicio: a, fim: b });
@@ -974,8 +1007,7 @@
       st.statusOpcoes = cfg.statusOpcoes || [];
       st.statusComNfd = cfg.statusComNfd || ['Aguardando transportadora', 'Finalizada'];
       if (SR.lembrado('modo') === 'quadro') alternarModo('quadro');
-      var salvo = SR.lembrado('periodo');
-      st.periodo = periodoDe(ATALHOS_SALVOS.indexOf(salvo) >= 0 ? salvo : 'semana', st.hoje); // último atalho usado (padrão: semana atual)
+      st.periodo = periodoSalvo(SR.lembrado('periodo'), st.hoje); // última escolha (padrão: semana atual)
       atualizarChip();
       carregar();
     },
@@ -1006,7 +1038,7 @@
     abrirOcorrencia: function (o, origem) { abrirDetalhe(o, origem); },
     /** Abre direto o "Formalizar e-mail" do protocolo. */
     formalizar: function (o, origem) { abrirDetalhe(o, origem); mostrarFormalizacao(o); },
-    _periodoDe: periodoDe // usado nos testes da tela
+    _periodoDe: periodoDe, _periodoSalvo: periodoSalvo, _codigoDoPeriodo: codigoDoPeriodo // usados nos testes da tela
   };
   esqueleto();
 })();
